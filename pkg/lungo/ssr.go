@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 func (a *App) serveSSR(w http.ResponseWriter, r *http.Request) {
@@ -167,29 +169,144 @@ func patternToExample(pattern string) string {
 	return strings.Join(parts, "/")
 }
 
+// ─── ISR Cache ──────────────────────────────────────────────────
+
+type cacheEntry struct {
+	data      json.RawMessage
+	fetchedAt time.Time
+	ttl       time.Duration
+}
+
+var (
+	loaderCache   = make(map[string]*cacheEntry)
+	loaderCacheMu sync.RWMutex
+)
+
+func getCached(key string) (json.RawMessage, bool) {
+	loaderCacheMu.RLock()
+	entry, ok := loaderCache[key]
+	loaderCacheMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(entry.fetchedAt) > entry.ttl {
+		return entry.data, false // stale — return data but signal revalidation needed
+	}
+	return entry.data, true
+}
+
+func setCache(key string, data json.RawMessage, ttl time.Duration) {
+	loaderCacheMu.Lock()
+	loaderCache[key] = &cacheEntry{data: data, fetchedAt: time.Now(), ttl: ttl}
+	loaderCacheMu.Unlock()
+}
+
+// ─── Loader Data Fetching ───────────────────────────────────────
+
 func (a *App) fetchLoaderData(route *Route, r *http.Request) json.RawMessage {
-	url := route.LoaderURL
-	for k, v := range route.Segments {
+	// Multi-source loaders: fetch all in parallel, merge into { key: data, ... }
+	if len(route.Loaders) > 1 {
+		return a.fetchMultiLoaderData(route, r)
+	}
+
+	// Single-source loader
+	source := LoaderSource{URL: route.LoaderURL}
+	if len(route.Loaders) == 1 {
+		source = route.Loaders[0]
+	}
+
+	return a.fetchSingleSource(source, route.Segments, r)
+}
+
+func (a *App) fetchMultiLoaderData(route *Route, r *http.Request) json.RawMessage {
+	type result struct {
+		key  string
+		data json.RawMessage
+	}
+
+	results := make(chan result, len(route.Loaders))
+	var wg sync.WaitGroup
+
+	for _, src := range route.Loaders {
+		wg.Add(1)
+		go func(s LoaderSource) {
+			defer wg.Done()
+			data := a.fetchSingleSource(s, route.Segments, r)
+			results <- result{key: s.Key, data: data}
+		}(src)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Merge results into a single object
+	merged := make(map[string]json.RawMessage)
+	for res := range results {
+		if res.data != nil {
+			merged[res.key] = res.data
+		} else {
+			merged[res.key] = json.RawMessage("{}")
+		}
+	}
+
+	out, _ := json.Marshal(merged)
+	return out
+}
+
+func (a *App) fetchSingleSource(source LoaderSource, segments map[string]string, r *http.Request) json.RawMessage {
+	url := source.URL
+	for k, v := range segments {
 		url = strings.ReplaceAll(url, ":"+k, v)
 		url = strings.ReplaceAll(url, "{"+k+"}", v)
 	}
 
-	// If there are segments and the URL didn't contain placeholders, append as query params
-	if len(route.Segments) > 0 && url == route.LoaderURL {
+	// Append segments as query params if URL didn't have placeholders
+	if len(segments) > 0 && url == source.URL {
 		sep := "?"
 		if strings.Contains(url, "?") {
 			sep = "&"
 		}
-		for k, v := range route.Segments {
+		for k, v := range segments {
 			url += sep + k + "=" + v
 			sep = "&"
 		}
 	}
 
-	handler, ok := a.apiRoutes[route.LoaderURL]
+	// Check ISR cache
+	if source.Revalidate > 0 {
+		cacheKey := url
+		cached, fresh := getCached(cacheKey)
+		if fresh {
+			return cached // serve from cache
+		}
+		if cached != nil {
+			// Stale — serve cached, revalidate in background
+			go func() {
+				data := a.callHandler(source.URL, url, r)
+				if data != nil {
+					setCache(cacheKey, data, time.Duration(source.Revalidate)*time.Second)
+				}
+			}()
+			return cached
+		}
+		// No cache — fetch, cache, return
+		data := a.callHandler(source.URL, url, r)
+		if data != nil {
+			setCache(cacheKey, data, time.Duration(source.Revalidate)*time.Second)
+		}
+		return data
+	}
+
+	return a.callHandler(source.URL, url, r)
+}
+
+func (a *App) callHandler(pattern, url string, r *http.Request) json.RawMessage {
+	handler, ok := a.apiRoutes[pattern]
 	if !ok {
-		for pattern, h := range a.apiRoutes {
-			if _, matched := matchPattern(pattern, url); matched {
+		for p, h := range a.apiRoutes {
+			if _, matched := matchPattern(p, url); matched {
 				handler = h
 				ok = true
 				break
@@ -203,8 +320,7 @@ func (a *App) fetchLoaderData(route *Route, r *http.Request) json.RawMessage {
 	rec := &responseRecorder{headers: make(http.Header)}
 	fakeReq, _ := http.NewRequest("GET", url, nil)
 
-	// Forward cookies and auth headers from the original request
-	// so loaders can access the user's session
+	// Forward cookies and auth headers
 	if r != nil {
 		for _, cookie := range r.Cookies() {
 			fakeReq.AddCookie(cookie)

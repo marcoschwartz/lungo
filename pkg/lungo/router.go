@@ -8,6 +8,13 @@ import (
 	"strings"
 )
 
+// LoaderSource describes a single data source in a loader.
+type LoaderSource struct {
+	Key        string // "stats", "user", etc. Empty for single-source loaders.
+	URL        string
+	Revalidate int // seconds, 0 = no cache
+}
+
 // Route represents a matched route with its page and layout chain.
 type Route struct {
 	Pattern     string
@@ -17,7 +24,8 @@ type Route struct {
 	ErrorPath   string            // relative path to error.js if exists
 	Segments    map[string]string // dynamic segments
 	HasLoader   bool
-	LoaderURL   string
+	LoaderURL   string         // kept for backwards compat (single source)
+	Loaders     []LoaderSource // multi-source loaders
 }
 
 // Router handles file-based routing.
@@ -252,7 +260,7 @@ func (r *Router) Match(urlPath string) *Route {
 
 	for _, entry := range r.routes {
 		if segments, ok := matchPattern(entry.pattern, urlPath); ok {
-			hasLoader, loaderURL := r.detectLoader(entry.pagePath)
+			hasLoader, loaderURL, loaders := r.detectLoader(entry.pagePath)
 			return &Route{
 				Pattern:     entry.pattern,
 				PagePath:    entry.pagePath,
@@ -262,6 +270,7 @@ func (r *Router) Match(urlPath string) *Route {
 				Segments:    segments,
 				HasLoader:   hasLoader,
 				LoaderURL:   loaderURL,
+				Loaders:     loaders,
 			}
 		}
 	}
@@ -299,7 +308,7 @@ func matchPattern(pattern, urlPath string) (map[string]string, bool) {
 	return segments, true
 }
 
-func (r *Router) detectLoader(pagePath string) (bool, string) {
+func (r *Router) detectLoader(pagePath string) (bool, string, []LoaderSource) {
 	var content string
 	if r.appFS != nil {
 		data, err := fs.ReadFile(r.appFS, pagePath)
@@ -307,7 +316,7 @@ func (r *Router) detectLoader(pagePath string) (bool, string) {
 			data, err = fs.ReadFile(r.appFS, strings.TrimSuffix(pagePath, ".js")+".jsx")
 		}
 		if err != nil {
-			return false, ""
+			return false, "", nil
 		}
 		content = string(data)
 	} else {
@@ -316,33 +325,171 @@ func (r *Router) detectLoader(pagePath string) (bool, string) {
 			data, err = os.ReadFile(filepath.Join(r.appDir, strings.TrimSuffix(pagePath, ".js")+".jsx"))
 		}
 		if err != nil {
-			return false, ""
+			return false, "", nil
 		}
 		content = string(data)
 	}
 
 	if !strings.Contains(content, "export") || !strings.Contains(content, "loader") {
-		return false, ""
+		return false, "", nil
 	}
 
+	// Find the loader object
 	idx := strings.Index(content, "loader")
 	if idx < 0 {
-		return false, ""
+		return false, "", nil
 	}
 	rest := content[idx:]
-	urlIdx := strings.Index(rest, `url:`)
-	if urlIdx < 0 {
-		return true, ""
+
+	// Find opening brace
+	braceIdx := strings.Index(rest, "{")
+	if braceIdx < 0 {
+		return true, "", nil
 	}
-	rest = rest[urlIdx+4:]
+	rest = rest[braceIdx:]
+
+	// Extract the object content (find matching close brace)
+	depth := 0
+	end := -1
+	for i, ch := range rest {
+		if ch == '{' {
+			depth++
+		} else if ch == '}' {
+			depth--
+			if depth == 0 {
+				end = i + 1
+				break
+			}
+		}
+	}
+	if end < 0 {
+		return true, "", nil
+	}
+	objStr := rest[:end]
+
+	// Check if it's a simple { url: "..." } format
+	if strings.Count(objStr, ":") == 1 || (strings.Contains(objStr, "url:") && !strings.Contains(objStr, ",\n")) {
+		// Simple single-source loader
+		url := extractQuotedAfter(objStr, "url:")
+		if url != "" {
+			revalidate := extractIntAfter(objStr, "revalidate:")
+			return true, url, []LoaderSource{{URL: url, Revalidate: revalidate}}
+		}
+	}
+
+	// Multi-source loader: { stats: "/api/stats", user: { url: "/api/me", revalidate: 60 } }
+	var sources []LoaderSource
+	// Parse key: value pairs
+	inner := objStr[1 : len(objStr)-1] // strip outer braces
+	parts := splitLoaderParts(inner)
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		colonIdx := strings.Index(part, ":")
+		if colonIdx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(part[:colonIdx])
+		val := strings.TrimSpace(part[colonIdx+1:])
+
+		// If key is "url" or "revalidate", it's a single-source loader field
+		if key == "url" {
+			url := trimQuotes(val)
+			revalidate := extractIntAfter(objStr, "revalidate:")
+			return true, url, []LoaderSource{{URL: url, Revalidate: revalidate}}
+		}
+		if key == "revalidate" {
+			continue
+		}
+
+		// Multi-source: key is the data field name
+		if strings.HasPrefix(val, "{") {
+			// Object value: { url: "...", revalidate: N }
+			url := extractQuotedAfter(val, "url:")
+			revalidate := extractIntAfter(val, "revalidate:")
+			if url != "" {
+				sources = append(sources, LoaderSource{Key: key, URL: url, Revalidate: revalidate})
+			}
+		} else {
+			// String value: "/api/stats"
+			url := trimQuotes(val)
+			if url != "" {
+				sources = append(sources, LoaderSource{Key: key, URL: url})
+			}
+		}
+	}
+
+	if len(sources) > 0 {
+		return true, sources[0].URL, sources
+	}
+
+	return true, "", nil
+}
+
+func splitLoaderParts(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i, ch := range s {
+		if ch == '{' {
+			depth++
+		} else if ch == '}' {
+			depth--
+		} else if ch == ',' && depth == 0 {
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		parts = append(parts, s[start:])
+	}
+	return parts
+}
+
+func extractQuotedAfter(s, key string) string {
+	idx := strings.Index(s, key)
+	if idx < 0 {
+		return ""
+	}
+	rest := s[idx+len(key):]
+	rest = strings.TrimSpace(rest)
 	q1 := strings.IndexAny(rest, `"'`)
 	if q1 < 0 {
-		return true, ""
+		return ""
 	}
+	quote := rest[q1]
 	rest = rest[q1+1:]
-	q2 := strings.IndexAny(rest, `"'`)
+	q2 := strings.IndexByte(rest, quote)
 	if q2 < 0 {
-		return true, ""
+		return ""
 	}
-	return true, rest[:q2]
+	return rest[:q2]
+}
+
+func extractIntAfter(s, key string) int {
+	idx := strings.Index(s, key)
+	if idx < 0 {
+		return 0
+	}
+	rest := strings.TrimSpace(s[idx+len(key):])
+	n := 0
+	for _, ch := range rest {
+		if ch >= '0' && ch <= '9' {
+			n = n*10 + int(ch-'0')
+		} else {
+			break
+		}
+	}
+	return n
+}
+
+func trimQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
