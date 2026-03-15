@@ -186,8 +186,8 @@ func stripTypeScript(s string) string {
 	// Generic type params on functions: function foo<T>(...)  → function foo(...)
 	s = regexp.MustCompile(`(<\w+(?:\s*,\s*\w+)*(?:\s+extends\s+[^>]+)?>)(\s*\()`).ReplaceAllString(s, "$2")
 
-	// Type assertions: foo as Bar → foo
-	s = regexp.MustCompile(`\s+as\s+\w+(?:\[\])?`).ReplaceAllString(s, "")
+	// Type assertions: foo as Bar → foo (only when followed by uppercase type name)
+	s = regexp.MustCompile(`\s+as\s+[A-Z]\w*(?:\[\])?`).ReplaceAllString(s, "")
 
 	// React.FC<Props>, React.ReactNode etc in type positions
 	// }: { children: React.ReactNode }) → })
