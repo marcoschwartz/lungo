@@ -227,17 +227,11 @@ func (t *jsxTranspiler) parseJSXChildren(closeTag string) []string {
 		ch := t.src[t.pos]
 
 		// Expression child: {expr}
-		// Also handle ${expr} — prefix $ is part of the expression display, not text
-		if ch == '{' || (ch == '$' && t.pos+1 < len(t.src) && t.src[t.pos+1] == '{') {
-			prefix := ""
-			if ch == '$' {
-				prefix = `"$", `
-				t.pos++ // skip $
-			}
-			t.pos++ // skip {
+		if ch == '{' {
+			t.pos++
 			expr := t.parseJSXExpression()
 			if strings.TrimSpace(expr) != "" {
-				children = append(children, prefix+strings.TrimSpace(expr))
+				children = append(children, strings.TrimSpace(expr))
 			}
 			continue
 		}
