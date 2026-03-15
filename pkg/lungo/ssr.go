@@ -202,6 +202,18 @@ func (a *App) fetchLoaderData(route *Route, r *http.Request) json.RawMessage {
 
 	rec := &responseRecorder{headers: make(http.Header)}
 	fakeReq, _ := http.NewRequest("GET", url, nil)
+
+	// Forward cookies and auth headers from the original request
+	// so loaders can access the user's session
+	if r != nil {
+		for _, cookie := range r.Cookies() {
+			fakeReq.AddCookie(cookie)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			fakeReq.Header.Set("Authorization", auth)
+		}
+	}
+
 	handler(rec, fakeReq)
 	return json.RawMessage(rec.body)
 }
