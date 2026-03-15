@@ -227,8 +227,15 @@ func (a *App) serveStatic(w http.ResponseWriter, r *http.Request, name string) {
 		}
 	} else {
 		filePath := filepath.Join(a.opts.StaticDir, name)
-		if _, err := os.Stat(filePath); err == nil {
-			http.ServeFile(w, r, filePath)
+		data, err := os.ReadFile(filePath)
+		if err == nil {
+			w.Header().Set("Content-Type", detectContentType(name))
+			if a.opts.Dev {
+				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			} else {
+				w.Header().Set("Cache-Control", "public, max-age=31536000")
+			}
+			w.Write(data)
 			return
 		}
 	}
