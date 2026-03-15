@@ -176,7 +176,7 @@ func stripTypeScript(s string) string {
 
 	// Function parameter types: (foo: string, bar: number) → (foo, bar)
 	// Also handles custom types: ({ title }: Props) → ({ title })
-	s = regexp.MustCompile(`:\s*(?:string|number|boolean|any|void|never|undefined|null)\b`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`:\s*(?:string|number|boolean|any|void|never)\b`).ReplaceAllString(s, "")
 	// Custom type annotations after } or identifier before ) or ,
 	s = regexp.MustCompile(`\}:\s*[A-Z]\w*(?:<[^>]*>)?\s*\)`).ReplaceAllStringFunc(s, func(m string) string {
 		return strings.Replace(m[:strings.Index(m, ":")], "", "", 0) + ")"
@@ -242,11 +242,14 @@ func convertAttributes(s string) string {
 	return s
 }
 
-// convertAttrOutsideStrings replaces attribute names only when they appear
-// as JSX attributes (followed by = or whitespace/>) and not inside string literals.
+// convertAttrOutsideStrings replaces attribute/event handler names when they appear
+// as JSX attributes, destructured props, or variable references — not inside strings.
 func convertAttrOutsideStrings(s, from, to string) string {
-	// Simple approach: replace when preceded by space/newline and followed by = or space or >
-	re := regexp.MustCompile(`(\s)` + from + `([\s=])`)
+	// Match as JSX attribute: preceded by whitespace, followed by = or whitespace or >
+	re := regexp.MustCompile(`(\s)` + from + `([\s=>])`)
 	s = re.ReplaceAllString(s, "${1}"+to+"${2}")
+	// Match in destructuring/args: preceded by { , ( and followed by , ) } whitespace
+	re2 := regexp.MustCompile(`([{,(])(\s*)` + from + `(\s*[,})])`)
+	s = re2.ReplaceAllString(s, "${1}${2}"+to+"${3}")
 	return s
 }

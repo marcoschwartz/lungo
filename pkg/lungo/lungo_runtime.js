@@ -677,9 +677,19 @@
     if (!dom || !vnode) return;
 
     if (vnode.tag === TEXT_NODE) {
+      // Skip to a text node if current dom is an element
+      while (dom && dom.nodeType === 1 && dom.nextSibling) {
+        dom = dom.nextSibling;
+      }
       vnode._dom = dom;
       return;
     }
+
+    // Skip whitespace text nodes to find matching element
+    while (dom && dom.nodeType === 3 && !dom.textContent.trim()) {
+      dom = dom.nextSibling;
+    }
+    if (!dom) return;
 
     if (typeof vnode.tag === "function") {
       const props = vnode.children.length > 0
@@ -701,11 +711,24 @@
       return;
     }
 
-    vnode._dom = dom;
-    setProps(dom, EMPTY_OBJ, vnode.props);
+    // Only set props on element nodes
+    if (dom.nodeType === 1) {
+      vnode._dom = dom;
+      setProps(dom, EMPTY_OBJ, vnode.props);
+    } else {
+      // DOM mismatch — fall back to creating new DOM
+      vnode._dom = dom;
+      return;
+    }
 
     let childDom = dom.firstChild;
     for (const child of vnode.children) {
+      // Skip whitespace text nodes when looking for element children
+      if (child.tag !== TEXT_NODE) {
+        while (childDom && childDom.nodeType === 3 && !childDom.textContent.trim()) {
+          childDom = childDom.nextSibling;
+        }
+      }
       if (childDom) {
         hydrateNode(child, childDom, dom);
         childDom = childDom.nextSibling;

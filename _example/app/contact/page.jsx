@@ -34,7 +34,7 @@ export default function ContactPage() {
   };
 
   if (success) {
-    return h`
+    return (
       <div>
         <h1 class="text-4xl font-extrabold tracking-tight mb-4 text-gray-900 dark:text-white">Thank You!</h1>
         <div class="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-xl p-6 mb-6">
@@ -42,23 +42,23 @@ export default function ContactPage() {
         </div>
         <a href="/contact" class="text-blue-600 dark:text-blue-400 hover:underline">Send another message</a>
       </div>
-    `;
+    );
   }
 
-  return h`
+  return (
     <div>
       <h1 class="text-4xl font-extrabold tracking-tight mb-4 text-gray-900 dark:text-white">Contact</h1>
       <p class="text-lg text-gray-500 dark:text-gray-400 mb-8 max-w-2xl">
         This form uses a Server Action — the POST goes directly to a Go handler, no API route needed.
       </p>
 
-      ${error ? h`
+      {error ? (
         <div class="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-xl p-4 mb-6 text-red-700 dark:text-red-400 text-sm">
-          ${decodeURIComponent(error)}
+          {decodeURIComponent(error)}
         </div>
-      ` : null}
+      ) : null}
 
-      <form onsubmit=${handleSubmit} class="max-w-lg flex flex-col gap-4">
+      <form onsubmit={handleSubmit} class="max-w-lg flex flex-col gap-4">
         <div>
           <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
           <input
@@ -93,11 +93,11 @@ export default function ContactPage() {
         <button
           type="submit"
           class="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50"
-          disabled=${sending}
+          disabled={sending}
         >
-          ${sending ? "Sending..." : "Send Message"}
+          {sending ? "Sending..." : "Send Message"}
         </button>
       </form>
     </div>
-  `;
+  );
 }

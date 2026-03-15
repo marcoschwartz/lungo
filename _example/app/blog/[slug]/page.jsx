@@ -22,8 +22,8 @@ export default function BlogPostPage({ data, params }) {
       <a href="/blog" class="text-sm text-blue-600 hover:underline mb-6 inline-block">← Back to blog</a>
       <article class="max-w-2xl">
         <div class="mb-8">
-          <h1 class="text-4xl font-extrabold tracking-tight mb-3 text-gray-900">{post.title}</h1>
-          <div class="flex items-center gap-3 text-sm text-gray-400">
+          <h1 class="text-4xl font-extrabold tracking-tight mb-3 text-gray-900 dark:text-white">{post.title}</h1>
+          <div class="flex items-center gap-3 text-sm text-gray-400 dark:text-gray-500">
             <span>{post.author}</span>
             <span>·</span>
             <span>{post.date}</span>
@@ -31,7 +31,7 @@ export default function BlogPostPage({ data, params }) {
         </div>
         <div>
           {paragraphs.map(p => (
-            <p class="text-gray-600 leading-relaxed mb-4">{p}</p>
+            <p class="text-gray-600 dark:text-gray-300 leading-relaxed mb-4">{p}</p>
           ))}
         </div>
       </article>

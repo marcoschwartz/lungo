@@ -60,7 +60,15 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage) string {
 	sb.WriteString("</head>\n<body>\n")
 
 	sb.WriteString(`<div id="root">`)
-	sb.WriteString(a.renderLayoutShell(route))
+	ssrHTML, ssrErr := a.evaluatePageSSR(route.PagePath, loaderData, route.Segments)
+	hasSSR := ssrErr == nil && ssrHTML != ""
+	if hasSSR {
+		// Wrap page content in layout(s)
+		ssrHTML = a.wrapInLayouts(ssrHTML, route.Layouts)
+		sb.WriteString(ssrHTML)
+	} else {
+		sb.WriteString(a.renderLayoutShell(route))
+	}
 	sb.WriteString("</div>\n\n")
 
 	sb.WriteString("<script>\n")
@@ -97,7 +105,7 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage) string {
 	sb.WriteString("\n")
 
 	sb.WriteString("<script type=\"module\">\n")
-	sb.WriteString("  const { h, render, RouterView } = window.Lungo;\n\n")
+	sb.WriteString("  const { h, render, hydrate, RouterView } = window.Lungo;\n\n")
 
 	// Import initial page and layouts so first render is instant (no async fetch)
 	sb.WriteString(fmt.Sprintf("  const initialPage = await import('%s');\n", pageURL(route.PagePath)))
@@ -125,7 +133,11 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage) string {
 	}
 	sb.WriteString("];\n\n")
 
-	sb.WriteString("  render(h`<${RouterView} layouts=${layouts} />`, document.getElementById('root'));\n")
+	if hasSSR {
+		sb.WriteString("  hydrate(h`<${RouterView} layouts=${layouts} />`, document.getElementById('root'));\n")
+	} else {
+		sb.WriteString("  render(h`<${RouterView} layouts=${layouts} />`, document.getElementById('root'));\n")
+	}
 	sb.WriteString("</script>\n</body>\n</html>")
 
 	return sb.String()

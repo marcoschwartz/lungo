@@ -271,7 +271,6 @@ func (t *jsxTranspiler) parseJSXExpression() string {
 	// Parse a JS expression inside {}, handling nested braces, strings, template literals
 	depth := 1
 	var out strings.Builder
-
 	for t.pos < len(t.src) && depth > 0 {
 		ch := t.src[t.pos]
 
