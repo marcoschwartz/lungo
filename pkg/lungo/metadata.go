@@ -1,0 +1,147 @@
+package lungo
+
+import (
+	"encoding/json"
+	"strings"
+)
+
+// PageMetadata holds SEO metadata extracted from page.js files.
+type PageMetadata struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+// extractMetadata reads a page.js file and extracts the metadata export.
+// Looks for: export const metadata = { title: "...", description: "..." }
+func (a *App) extractMetadata(pagePath string) *PageMetadata {
+	data, err := a.readAppFile(pagePath)
+	if err != nil {
+		return nil
+	}
+	content := string(data)
+
+	idx := strings.Index(content, "export const metadata")
+	if idx < 0 {
+		idx = strings.Index(content, "export let metadata")
+	}
+	if idx < 0 {
+		return nil
+	}
+
+	// Find the object literal
+	rest := content[idx:]
+	braceStart := strings.Index(rest, "{")
+	if braceStart < 0 {
+		return nil
+	}
+	rest = rest[braceStart:]
+
+	// Find matching closing brace
+	depth := 0
+	end := -1
+	for i, ch := range rest {
+		if ch == '{' {
+			depth++
+		} else if ch == '}' {
+			depth--
+			if depth == 0 {
+				end = i + 1
+				break
+			}
+		}
+	}
+	if end < 0 {
+		return nil
+	}
+
+	objStr := rest[:end]
+	// Convert JS object to JSON (handle unquoted keys)
+	jsonStr := jsObjToJSON(objStr)
+
+	var meta PageMetadata
+	if err := json.Unmarshal([]byte(jsonStr), &meta); err != nil {
+		return nil
+	}
+	return &meta
+}
+
+// jsObjToJSON converts a simple JS object literal to JSON.
+// Handles: { title: "Hello", description: "World" }
+// Does NOT handle computed keys, nested objects, etc.
+func jsObjToJSON(s string) string {
+	var result strings.Builder
+	i := 0
+	inString := false
+	stringChar := byte(0)
+
+	for i < len(s) {
+		ch := s[i]
+
+		if inString {
+			result.WriteByte(ch)
+			if ch == stringChar && (i == 0 || s[i-1] != '\\') {
+				inString = false
+			}
+			i++
+			continue
+		}
+
+		if ch == '"' || ch == '\'' {
+			if ch == '\'' {
+				result.WriteByte('"') // convert single quotes to double
+			} else {
+				result.WriteByte(ch)
+			}
+			inString = true
+			stringChar = ch
+			i++
+			continue
+		}
+
+		// Check for unquoted key: word followed by :
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch == '_' {
+			keyStart := i
+			for i < len(s) && (s[i] >= 'a' && s[i] <= 'z' || s[i] >= 'A' && s[i] <= 'Z' || s[i] >= '0' && s[i] <= '9' || s[i] == '_') {
+				i++
+			}
+			key := s[keyStart:i]
+			// Skip whitespace
+			for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+				i++
+			}
+			if i < len(s) && s[i] == ':' {
+				// It's a key — quote it
+				result.WriteByte('"')
+				result.WriteString(key)
+				result.WriteByte('"')
+			} else {
+				result.WriteString(key)
+			}
+			continue
+		}
+
+		result.WriteByte(ch)
+		i++
+	}
+
+	return result.String()
+}
+
+// renderMetadataHead generates <head> tags from metadata.
+func renderMetadataHead(meta *PageMetadata) string {
+	if meta == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if meta.Title != "" {
+		sb.WriteString("  <title>")
+		sb.WriteString(meta.Title)
+		sb.WriteString("</title>\n")
+	}
+	if meta.Description != "" {
+		sb.WriteString("  <meta name=\"description\" content=\"")
+		sb.WriteString(meta.Description)
+		sb.WriteString("\">\n")
+	}
+	return sb.String()
+}
