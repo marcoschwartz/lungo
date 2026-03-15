@@ -1,6 +1,7 @@
 package lungo
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -242,10 +243,13 @@ func (t *jsxTranspiler) parseJSXChildren(closeTag string) []string {
 			continue
 		}
 
-		// Text content
+		// Text content — preserve meaningful whitespace between inline elements
 		text := t.parseTextContent()
 		if strings.TrimSpace(text) != "" {
-			children = append(children, `"`+escapeJSString(strings.TrimSpace(text))+`"`)
+			// Collapse internal whitespace (newlines, tabs, multiple spaces) to single spaces
+			// but preserve a leading/trailing space if the original had one
+			collapsed := collapseWhitespace(text)
+			children = append(children, `"`+escapeJSString(collapsed)+`"`)
 		}
 	}
 
@@ -540,6 +544,30 @@ func isTagStart(ch byte) bool {
 
 func isTagChar(ch byte) bool {
 	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
+}
+
+// collapseWhitespace normalizes whitespace in JSX text content.
+// Collapses newlines/tabs/multiple spaces to single spaces,
+// preserves a single leading space if text started with whitespace,
+// preserves a single trailing space if text ended with whitespace.
+func collapseWhitespace(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	hasLeading := s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r'
+	hasTrailing := s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\n' || s[len(s)-1] == '\r'
+
+	// Collapse all whitespace runs to single space
+	result := regexp.MustCompile(`\s+`).ReplaceAllString(s, " ")
+	result = strings.TrimSpace(result)
+
+	if hasLeading {
+		result = " " + result
+	}
+	if hasTrailing {
+		result = result + " "
+	}
+	return result
 }
 
 func escapeJSString(s string) string {
