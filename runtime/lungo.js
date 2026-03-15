@@ -717,11 +717,31 @@
 
   let currentPath = location.pathname;
 
+  // ─── Scroll Position Management ──────────────────────────────
+  const scrollPositions = new Map();
+  let isPopState = false;
+
+  function saveScroll() {
+    scrollPositions.set(currentPath, window.scrollY);
+  }
+
+  function restoreScroll(path) {
+    if (isPopState && scrollPositions.has(path)) {
+      // Back/forward — restore saved position
+      requestAnimationFrame(() => window.scrollTo(0, scrollPositions.get(path)));
+    } else {
+      // Forward nav — scroll to top
+      window.scrollTo(0, 0);
+    }
+    isPopState = false;
+  }
+
   function useRouter() {
     const [path, setPath] = useState(currentPath);
 
     useEffect(() => {
       const handler = () => {
+        isPopState = true;
         currentPath = location.pathname;
         setPath(currentPath);
       };
@@ -733,6 +753,7 @@
       pathname: path,
       query: Object.fromEntries(new URLSearchParams(location.search)),
       push(url) {
+        saveScroll();
         history.pushState(null, "", url);
         currentPath = url;
         setPath(url);
@@ -746,9 +767,60 @@
   }
 
   function navigate(url) {
+    saveScroll();
     history.pushState(null, "", url);
     currentPath = url;
     window.dispatchEvent(new PopStateEvent("popstate"));
+  }
+
+  // ─── Link Prefetching ────────────────────────────────────────
+  const prefetchedRoutes = new Set();
+
+  function prefetchRoute(href) {
+    if (prefetchedRoutes.has(href)) return;
+    const routes = window.__LUNGO_ROUTES__ || [];
+    for (const r of routes) {
+      if (matchRoute(r.pattern, href)) {
+        prefetchedRoutes.add(href);
+        // Prefetch the page module
+        const link = document.createElement("link");
+        link.rel = "modulepreload";
+        link.href = r.pagePath;
+        document.head.appendChild(link);
+        // Also prefetch loader data
+        fetch("/_data" + href).catch(() => {});
+        break;
+      }
+    }
+  }
+
+  // Prefetch links when they become visible
+  if (typeof IntersectionObserver !== "undefined") {
+    const prefetchObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          const href = entry.target.getAttribute("href");
+          if (href) prefetchRoute(href);
+        }
+      }
+    }, { rootMargin: "200px" });
+
+    // Observe links after page loads
+    const observeLinks = () => {
+      document.querySelectorAll("a[href]").forEach(link => {
+        const href = link.getAttribute("href");
+        if (href && !href.startsWith("http") && !href.startsWith("#") && isInternalRoute(href)) {
+          prefetchObserver.observe(link);
+        }
+      });
+    };
+
+    // Re-observe after each render
+    const origRender = render;
+    render = function(vnode, container) {
+      origRender(vnode, container);
+      requestAnimationFrame(observeLinks);
+    };
   }
 
   // Intercept <a> clicks for SPA navigation
@@ -758,10 +830,19 @@
     const href = link.getAttribute("href");
     if (!href || href.startsWith("http") || href.startsWith("//") || href.startsWith("#")) return;
     if (link.target === "_blank" || e.metaKey || e.ctrlKey || e.shiftKey) return;
-    // Don't intercept if there's no route for this path
     if (!link.hasAttribute("data-link") && !isInternalRoute(href)) return;
     e.preventDefault();
     navigate(href);
+  });
+
+  // Also prefetch on hover for instant nav
+  document.addEventListener("mouseover", (e) => {
+    const link = e.target.closest("a[href]");
+    if (!link) return;
+    const href = link.getAttribute("href");
+    if (href && !href.startsWith("http") && !href.startsWith("#")) {
+      prefetchRoute(href);
+    }
   });
 
   function isInternalRoute(href) {
@@ -827,17 +908,22 @@
 
   function RouterView(props) {
     const router = useRouter();
-    const [Page, setPage] = useState(() => window.Lungo?.__initialPage || null);
-    const [data, setData] = useState(() => window.Lungo?.__initialData || window.__LUNGO_DATA__ || {});
-    const [params, setParams] = useState(() => window.__LUNGO_ROUTE__?.params || {});
-    const [error, setError] = useState(null);
+    // Store page, data, params together so we can swap atomically
+    const [view, setView] = useState(() => ({
+      Page: window.Lungo?.__initialPage || null,
+      data: window.Lungo?.__initialData || window.__LUNGO_DATA__ || {},
+      params: window.__LUNGO_ROUTE__?.params || {},
+      error: null,
+    }));
     const layouts = props.layouts || [];
     const initialPath = useRef(window.__LUNGO_INITIAL_PATH__);
+    const navId = useRef(0); // prevents stale async updates
 
     useEffect(() => {
       // Skip on initial render — SSR already loaded this page
       if (router.pathname === initialPath.current) {
         initialPath.current = null;
+        restoreScroll(router.pathname);
         return;
       }
 
@@ -856,39 +942,44 @@
 
       if (!matched) return;
 
-      setError(null);
+      // Increment nav ID so stale loads are ignored
+      const thisNav = ++navId.current;
 
       const loadPage = async () => {
         try {
-          let mod = pageModuleCache.get(matched.pagePath);
-          if (!mod) {
-            mod = await import(matched.pagePath);
-            pageModuleCache.set(matched.pagePath, mod);
-          }
+          // Load module and data in parallel
+          const [mod, loaderData] = await Promise.all([
+            pageModuleCache.get(matched.pagePath)
+              ? Promise.resolve(pageModuleCache.get(matched.pagePath))
+              : import(matched.pagePath).then(m => { pageModuleCache.set(matched.pagePath, m); return m; }),
+            fetch("/_data" + router.pathname)
+              .then(r => r.ok ? r.json() : {})
+              .catch(() => ({})),
+          ]);
 
-          // Fetch loader data
-          let loaderData = {};
-          try {
-            const dataResp = await fetch("/_data" + router.pathname);
-            if (dataResp.ok) {
-              const json = await dataResp.json();
-              if (json && Object.keys(json).length > 0) {
-                loaderData = json;
-              }
-            }
-          } catch (e) { /* no loader */ }
+          // Ignore if a newer navigation happened while we were loading
+          if (thisNav !== navId.current) return;
 
-          setPage(() => mod.default);
-          setData(loaderData);
-          setParams(matchedParams);
+          // Swap everything in one state update — old page stays visible until now
+          setView({
+            Page: mod.default,
+            data: (loaderData && Object.keys(loaderData).length > 0) ? loaderData : {},
+            params: matchedParams,
+            error: null,
+          });
+
+          // Restore or reset scroll after render
+          requestAnimationFrame(() => restoreScroll(router.pathname));
         } catch (err) {
-          setError(err.message || "Failed to load page");
-          setLoading(false);
+          if (thisNav !== navId.current) return;
+          setView(prev => ({ ...prev, error: err.message || "Failed to load page" }));
         }
       };
 
       loadPage();
     }, [router.pathname]);
+
+    const { Page, data, params, error } = view;
 
     // Error state
     if (error) {
@@ -909,7 +1000,7 @@
       return h`<div>Loading...</div>`;
     }
 
-    // Normal render: Page wrapped in Layouts
+    // Normal render: Page wrapped in Layouts (layouts persist, only Page swaps)
     let content = h`<${Page} data=${data} params=${params} />`;
     for (let i = layouts.length - 1; i >= 0; i--) {
       const Layout = layouts[i];
