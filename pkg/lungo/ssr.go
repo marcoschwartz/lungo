@@ -73,8 +73,12 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	ssrHTML, _, ssrErr := a.evaluatePageSSR(route.PagePath, loaderData, route.Segments)
 	hasSSR := ssrErr == nil && ssrHTML != ""
 	if hasSSR {
-		// Wrap page content in layout(s), passing theme for correct SSR
-		ssrHTML = a.wrapInLayouts(ssrHTML, route.Layouts, isDark)
+		// Wrap page content in layout(s), passing theme + URL path for correct SSR
+		urlPath := route.Pattern
+		if r != nil {
+			urlPath = r.URL.Path
+		}
+		ssrHTML = a.wrapInLayouts(ssrHTML, route.Layouts, isDark, urlPath)
 		sb.WriteString(ssrHTML)
 	} else {
 		sb.WriteString(a.renderLayoutShell(route))

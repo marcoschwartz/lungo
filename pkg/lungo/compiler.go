@@ -529,8 +529,12 @@ func (c *compiler) compileFuncCall(fn compiledExpr) compiledExpr {
 			case "__hook_useEffect":
 				return jvUndefined
 			case "__hook_useRouter":
+				pathname := "/"
+				if p, ok := scope["__ssr_pathname"]; ok && p.str != "" {
+					pathname = p.str
+				}
 				return jvObj(map[string]*jsValue{
-					"pathname": jvStr("/"),
+					"pathname": jvStr(pathname),
 					"query":    jvObj(map[string]*jsValue{}),
 				})
 			case "__hook_useRef":

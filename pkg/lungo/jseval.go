@@ -914,8 +914,12 @@ func (e *jsEval) evalFuncCall(fn *jsValue) *jsValue {
 		return jvUndefined
 	}
 	if fn.str == "__hook_useRouter" {
+		pathname := "/"
+		if p, ok := e.scope["__ssr_pathname"]; ok && p.str != "" {
+			pathname = p.str
+		}
 		return jvObj(map[string]*jsValue{
-			"pathname": jvStr("/"),
+			"pathname": jvStr(pathname),
 			"query":    jvObj(map[string]*jsValue{}),
 		})
 	}

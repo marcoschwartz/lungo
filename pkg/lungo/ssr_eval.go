@@ -157,9 +157,9 @@ func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, param
 
 // wrapInLayouts evaluates each layout and wraps the page HTML inside it.
 // Layouts use hooks (useState, useEffect, useRouter) which we stub out.
-func (a *App) wrapInLayouts(pageHTML string, layouts []string, isDark bool) string {
+func (a *App) wrapInLayouts(pageHTML string, layouts []string, isDark bool, urlPath ...string) string {
 	for _, layoutPath := range layouts {
-		wrapped, err := a.evaluateLayout(layoutPath, pageHTML, isDark)
+		wrapped, err := a.evaluateLayout(layoutPath, pageHTML, isDark, urlPath...)
 		if err != nil {
 			// Layout eval failed — just return page content as-is
 			continue
@@ -170,7 +170,7 @@ func (a *App) wrapInLayouts(pageHTML string, layouts []string, isDark bool) stri
 }
 
 // evaluateLayout evaluates a layout component, injecting pageHTML as {children}.
-func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool) (string, error) {
+func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool, urlPath ...string) (string, error) {
 	cached, err := a.getPageCache(layoutPath)
 	if err != nil {
 		return "", err
@@ -211,7 +211,11 @@ func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool
 	tokens := make([]tok, len(cached.tokens))
 	copy(tokens, cached.tokens)
 	ev := &jsEval{tokens: tokens, pos: 0, scope: scope}
-	stubHooks(ev)
+	if len(urlPath) > 0 {
+		stubHooksWithPath(ev, urlPath[0])
+	} else {
+		stubHooks(ev)
+	}
 
 	result := ev.evalStatements()
 	if result.typ != jsTypeVNode || result.vnode == nil {
@@ -226,13 +230,18 @@ func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool
 
 // stubHooks adds stub implementations for client-side hooks to the evaluator scope.
 func stubHooks(ev *jsEval) {
-	// These are handled in the evaluator's primary() via scope lookups.
-	// We add sentinel values that the evaluator recognizes.
+	stubHooksWithPath(ev, "/")
+}
+
+// stubHooksWithPath adds hook stubs with the given URL path for useRouter.
+func stubHooksWithPath(ev *jsEval, urlPath string) {
 	ev.scope["useState"] = &jsValue{typ: jsTypeFunc, str: "__hook_useState"}
 	ev.scope["useEffect"] = &jsValue{typ: jsTypeFunc, str: "__hook_useEffect"}
 	ev.scope["useRouter"] = &jsValue{typ: jsTypeFunc, str: "__hook_useRouter"}
 	ev.scope["useRef"] = &jsValue{typ: jsTypeFunc, str: "__hook_useRef"}
 	ev.scope["useMemo"] = &jsValue{typ: jsTypeFunc, str: "__hook_useMemo"}
+	// Store the URL path so useRouter() returns the correct pathname
+	ev.scope["__ssr_pathname"] = jvStr(urlPath)
 }
 
 // extractDefaultExport finds the default export function and returns its body and parameter string.
