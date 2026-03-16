@@ -857,9 +857,9 @@
         setPath(url);
       },
       refresh() {
-        // Force re-fetch of page + layout data without URL change
-        window.__LUNGO_REFRESH__ = true;
-        window.dispatchEvent(new PopStateEvent("popstate"));
+        // Increment global counter and dispatch event
+        window.__LUNGO_REFRESH__ = (window.__LUNGO_REFRESH__ || 0) + 1;
+        window.dispatchEvent(new CustomEvent("lungo:refresh"));
       },
     };
   }
@@ -1017,20 +1017,16 @@
     const initialPath = useRef(window.__LUNGO_INITIAL_PATH__);
     const navId = useRef(0); // prevents stale async updates
 
-    // Track layout data for refresh
-    const [layoutData, setLayoutData] = useState(() => {
-      const ld = {};
-      for (const l of layouts) {
-        if (l && l.data) ld[l] = l.data;
-      }
-      return ld;
-    });
+    const [refreshKey, setRefreshKey] = useState(0);
 
     useEffect(() => {
-      const isRefresh = window.__LUNGO_REFRESH__;
-      if (isRefresh) {
-        delete window.__LUNGO_REFRESH__;
-      }
+      const onRefresh = () => setRefreshKey(k => k + 1);
+      window.addEventListener("lungo:refresh", onRefresh);
+      return () => window.removeEventListener("lungo:refresh", onRefresh);
+    }, []);
+
+    useEffect(() => {
+      const isRefresh = refreshKey > 0;
 
       // Skip on initial render — SSR already loaded this page
       if (!isRefresh && router.pathname === initialPath.current) {
@@ -1059,21 +1055,18 @@
 
       const loadPage = async () => {
         try {
-          // Load module, page data, and layout data in parallel
+          // Load module and page data in parallel
           const fetches = [
-            isRefresh
-              ? Promise.resolve(pageModuleCache.get(matched.pagePath) || import(matched.pagePath))
-              : (pageModuleCache.get(matched.pagePath)
-                ? Promise.resolve(pageModuleCache.get(matched.pagePath))
-                : import(matched.pagePath).then(m => { pageModuleCache.set(matched.pagePath, m); return m; })),
+            pageModuleCache.get(matched.pagePath)
+              ? Promise.resolve(pageModuleCache.get(matched.pagePath))
+              : import(matched.pagePath).then(m => { pageModuleCache.set(matched.pagePath, m); return m; }),
             fetch("/_data" + router.pathname)
               .then(r => r.ok ? r.json() : {})
               .catch(() => ({})),
           ];
 
           // On refresh, also re-fetch layout loader data
-          const layoutURLs = window.__LUNGO_LAYOUTS__ || [];
-          if (isRefresh && layoutURLs.length > 0) {
+          if (isRefresh) {
             fetches.push(
               fetch("/_data" + router.pathname + "?_layouts=1")
                 .then(r => r.ok ? r.json() : null)
@@ -1093,9 +1086,8 @@
           if (newLayoutData) {
             for (const entry of layouts) {
               if (entry && entry.component) {
-                const layoutPath = Object.keys(newLayoutData).find(k => newLayoutData[k]);
-                if (layoutPath) {
-                  entry.data = newLayoutData[layoutPath];
+                for (const key of Object.keys(newLayoutData)) {
+                  entry.data = newLayoutData[key];
                 }
               }
             }
@@ -1118,7 +1110,7 @@
       };
 
       loadPage();
-    }, [router.pathname]);
+    }, [router.pathname, refreshKey]);
 
     const { Page, data, params, error } = view;
 
