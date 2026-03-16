@@ -71,7 +71,9 @@ func New(opts Options) *App {
 	}
 
 	if opts.Dev {
-		app.hmr = NewHMR(opts.AppDir)
+		app.hmr = NewHMR(opts.AppDir, func() {
+			app.router.Rescan()
+		})
 	}
 
 	return app
