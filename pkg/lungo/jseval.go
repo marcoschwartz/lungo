@@ -244,7 +244,8 @@ const (
 	tokOr
 	tokNot
 	tokQuestion
-	tokArrow // =>
+	tokNullCoalesce // ??
+	tokArrow        // =>
 	tokAssign
 	tokSpread // ...
 )
@@ -454,7 +455,12 @@ func jsTokenize(src string) []tok {
 		case '!':
 			tokens = append(tokens, tok{t: tokNot})
 		case '?':
-			tokens = append(tokens, tok{t: tokQuestion})
+			if i+1 < len(src) && src[i+1] == '?' {
+				tokens = append(tokens, tok{t: tokNullCoalesce})
+				i++
+			} else {
+				tokens = append(tokens, tok{t: tokQuestion})
+			}
 		case '=':
 			tokens = append(tokens, tok{t: tokAssign})
 		}
@@ -531,7 +537,7 @@ func (e *jsEval) expr() *jsValue {
 }
 
 func (e *jsEval) ternary() *jsValue {
-	val := e.logicalOr()
+	val := e.nullishCoalesce()
 	if e.peek().t == tokQuestion {
 		e.advance() // skip ?
 		if val.truthy() {
@@ -590,6 +596,18 @@ func (e *jsEval) skipExpr() {
 			e.pos++
 		}
 	}
+}
+
+func (e *jsEval) nullishCoalesce() *jsValue {
+	val := e.logicalOr()
+	for e.peek().t == tokNullCoalesce {
+		e.advance()
+		right := e.logicalOr()
+		if val.typ == jsTypeNull || val.typ == jsTypeUndefined {
+			val = right
+		}
+	}
+	return val
 }
 
 func (e *jsEval) logicalOr() *jsValue {
@@ -1107,6 +1125,278 @@ func (e *jsEval) handleMethodCall(val *jsValue, method string) *jsValue {
 		arg := e.expr()
 		e.expect(tokRParen)
 		return jvBool(arg.typ == jsTypeArray)
+
+	// ── String methods ──────────────────────────────────────
+	case "replace":
+		search := e.expr()
+		e.expect(tokComma)
+		replacement := e.expr()
+		e.expect(tokRParen)
+		if val.typ == jsTypeString {
+			return jvStr(strings.Replace(val.str, search.toStr(), replacement.toStr(), 1))
+		}
+		return val
+	case "replaceAll":
+		search := e.expr()
+		e.expect(tokComma)
+		replacement := e.expr()
+		e.expect(tokRParen)
+		if val.typ == jsTypeString {
+			return jvStr(strings.ReplaceAll(val.str, search.toStr(), replacement.toStr()))
+		}
+		return val
+	case "startsWith":
+		prefix := e.expr()
+		e.expect(tokRParen)
+		if val.typ == jsTypeString {
+			return jvBool(strings.HasPrefix(val.str, prefix.toStr()))
+		}
+		return jvFalse
+	case "endsWith":
+		suffix := e.expr()
+		e.expect(tokRParen)
+		if val.typ == jsTypeString {
+			return jvBool(strings.HasSuffix(val.str, suffix.toStr()))
+		}
+		return jvFalse
+	case "repeat":
+		count := 0
+		if e.peek().t != tokRParen {
+			count = int(e.expr().toNum())
+		}
+		e.expect(tokRParen)
+		if val.typ == jsTypeString && count > 0 {
+			return jvStr(strings.Repeat(val.str, count))
+		}
+		return jvStr("")
+	case "toLowerCase":
+		e.expect(tokRParen)
+		return jvStr(strings.ToLower(val.toStr()))
+	case "toUpperCase":
+		e.expect(tokRParen)
+		return jvStr(strings.ToUpper(val.toStr()))
+	case "charAt":
+		idx := 0
+		if e.peek().t != tokRParen {
+			idx = int(e.expr().toNum())
+		}
+		e.expect(tokRParen)
+		s := val.toStr()
+		if idx >= 0 && idx < len(s) {
+			return jvStr(string(s[idx]))
+		}
+		return jvStr("")
+	case "indexOf":
+		search := e.expr()
+		e.expect(tokRParen)
+		if val.typ == jsTypeString {
+			return jvNum(float64(strings.Index(val.str, search.toStr())))
+		}
+		if val.typ == jsTypeArray {
+			for i, item := range val.array {
+				if jsStrictEqual(item, search) {
+					return jvNum(float64(i))
+				}
+			}
+			return jvNum(-1)
+		}
+		return jvNum(-1)
+	case "lastIndexOf":
+		search := e.expr()
+		e.expect(tokRParen)
+		if val.typ == jsTypeString {
+			return jvNum(float64(strings.LastIndex(val.str, search.toStr())))
+		}
+		return jvNum(-1)
+	case "substring":
+		start := 0
+		end := -1
+		if e.peek().t != tokRParen {
+			start = int(e.expr().toNum())
+			if e.peek().t == tokComma {
+				e.advance()
+				end = int(e.expr().toNum())
+			}
+		}
+		e.expect(tokRParen)
+		s := val.toStr()
+		if start < 0 {
+			start = 0
+		}
+		if end < 0 {
+			end = len(s)
+		}
+		if start > len(s) {
+			start = len(s)
+		}
+		if end > len(s) {
+			end = len(s)
+		}
+		if start > end {
+			start, end = end, start
+		}
+		return jvStr(s[start:end])
+	case "trimStart", "trimLeft":
+		e.expect(tokRParen)
+		return jvStr(strings.TrimLeft(val.toStr(), " \t\n\r"))
+	case "trimEnd", "trimRight":
+		e.expect(tokRParen)
+		return jvStr(strings.TrimRight(val.toStr(), " \t\n\r"))
+
+	// ── Array methods ───────────────────────────────────────
+	case "reduce":
+		return e.evalReduce(val)
+	case "concat":
+		var result []*jsValue
+		if val.typ == jsTypeArray {
+			result = append(result, val.array...)
+		}
+		for e.peek().t != tokRParen {
+			arg := e.expr()
+			if arg.typ == jsTypeArray {
+				result = append(result, arg.array...)
+			} else {
+				result = append(result, arg)
+			}
+			if e.peek().t == tokComma {
+				e.advance()
+			}
+		}
+		e.expect(tokRParen)
+		return jvArr(result)
+	case "reverse":
+		e.expect(tokRParen)
+		if val.typ == jsTypeArray {
+			n := len(val.array)
+			result := make([]*jsValue, n)
+			for i, v := range val.array {
+				result[n-1-i] = v
+			}
+			return jvArr(result)
+		}
+		return val
+	case "sort":
+		if e.peek().t == tokRParen {
+			// No comparator — sort by string representation
+			e.expect(tokRParen)
+			if val.typ == jsTypeArray {
+				result := make([]*jsValue, len(val.array))
+				copy(result, val.array)
+				sortJSValues(result)
+				return jvArr(result)
+			}
+			return val
+		}
+		// With comparator callback — skip for now, sort by string
+		e.skipBalanced(tokLParen, tokRParen)
+		if val.typ == jsTypeArray {
+			result := make([]*jsValue, len(val.array))
+			copy(result, val.array)
+			sortJSValues(result)
+			return jvArr(result)
+		}
+		return val
+	case "flat":
+		depth := 1
+		if e.peek().t != tokRParen {
+			depth = int(e.expr().toNum())
+		}
+		e.expect(tokRParen)
+		if val.typ == jsTypeArray {
+			return jvArr(flattenArray(val.array, depth))
+		}
+		return val
+	case "flatMap":
+		mapped := e.evalMapFilter(val, "map")
+		if mapped.typ == jsTypeArray {
+			return jvArr(flattenArray(mapped.array, 1))
+		}
+		return mapped
+	case "push":
+		// Returns new length (arrays are immutable in SSR)
+		count := len(val.array)
+		for e.peek().t != tokRParen {
+			e.expr()
+			count++
+			if e.peek().t == tokComma {
+				e.advance()
+			}
+		}
+		e.expect(tokRParen)
+		return jvNum(float64(count))
+	case "pop":
+		e.expect(tokRParen)
+		if val.typ == jsTypeArray && len(val.array) > 0 {
+			return val.array[len(val.array)-1]
+		}
+		return jvUndefined
+	case "shift":
+		e.expect(tokRParen)
+		if val.typ == jsTypeArray && len(val.array) > 0 {
+			return val.array[0]
+		}
+		return jvUndefined
+	case "length":
+		// .length() — shouldn't be called as method but handle gracefully
+		e.expect(tokRParen)
+		if val.typ == jsTypeArray {
+			return jvNum(float64(len(val.array)))
+		}
+		if val.typ == jsTypeString {
+			return jvNum(float64(len(val.str)))
+		}
+		return jvNum(0)
+	case "keys":
+		// Object.keys() handled elsewhere, but arr.keys() returns indices
+		e.expect(tokRParen)
+		if val.typ == jsTypeObject && val.object != nil {
+			keys := make([]*jsValue, 0, len(val.object))
+			for k := range val.object {
+				keys = append(keys, jvStr(k))
+			}
+			return jvArr(keys)
+		}
+		return jvArr(nil)
+	case "values":
+		e.expect(tokRParen)
+		if val.typ == jsTypeObject && val.object != nil {
+			vals := make([]*jsValue, 0, len(val.object))
+			for _, v := range val.object {
+				vals = append(vals, v)
+			}
+			return jvArr(vals)
+		}
+		return jvArr(nil)
+	case "entries":
+		e.expect(tokRParen)
+		if val.typ == jsTypeObject && val.object != nil {
+			entries := make([]*jsValue, 0, len(val.object))
+			for k, v := range val.object {
+				entries = append(entries, jvArr([]*jsValue{jvStr(k), v}))
+			}
+			return jvArr(entries)
+		}
+		return jvArr(nil)
+	case "assign":
+		// Object.assign(target, ...sources)
+		target := val
+		if target.typ != jsTypeObject {
+			target = &jsValue{typ: jsTypeObject, object: make(map[string]*jsValue)}
+		}
+		for e.peek().t != tokRParen {
+			src := e.expr()
+			if src.typ == jsTypeObject && src.object != nil {
+				for k, v := range src.object {
+					target.object[k] = v
+				}
+			}
+			if e.peek().t == tokComma {
+				e.advance()
+			}
+		}
+		e.expect(tokRParen)
+		return target
+
 	default:
 		// Check if method is a callable property on the object
 		if val.typ == jsTypeObject && val.object != nil {
@@ -1343,6 +1633,128 @@ func (e *jsEval) evalSomeEvery(val *jsValue, method string) *jsValue {
 	return jvTrue
 }
 
+// evalReduce handles array.reduce((acc, item) => expr, initialValue)
+func (e *jsEval) evalReduce(val *jsValue) *jsValue {
+	if val.typ != jsTypeArray {
+		for e.peek().t != tokRParen && e.peek().t != tokEOF {
+			e.advance()
+		}
+		e.expect(tokRParen)
+		return jvUndefined
+	}
+
+	// Parse arrow params: (acc, item) or (acc, item, index)
+	params := e.parseArrowParams()
+	e.expect(tokArrow)
+
+	// Capture body tokens — read until comma at depth 0 (before initialValue) or )
+	bodyStart := e.pos
+	hasBodyParen := e.peek().t == tokLParen
+	hasBodyBrace := e.peek().t == tokLBrace
+	if hasBodyParen {
+		e.skipBalanced(tokLParen, tokRParen)
+	} else if hasBodyBrace {
+		e.skipBalanced(tokLBrace, tokRBrace)
+	} else {
+		depth := 0
+		for e.pos < len(e.tokens) {
+			t := e.tokens[e.pos]
+			if t.t == tokLParen {
+				depth++
+			} else if t.t == tokRParen {
+				if depth == 0 {
+					break
+				}
+				depth--
+			} else if t.t == tokComma && depth == 0 {
+				break
+			}
+			e.pos++
+		}
+	}
+	bodyEnd := e.pos
+
+	// Parse initial value if present
+	var accumulator *jsValue
+	if e.peek().t == tokComma {
+		e.advance()
+		accumulator = e.expr()
+	}
+	e.expect(tokRParen)
+
+	bodyTokens := make([]tok, bodyEnd-bodyStart)
+	copy(bodyTokens, e.tokens[bodyStart:bodyEnd])
+	if hasBodyParen && len(bodyTokens) >= 2 && bodyTokens[0].t == tokLParen {
+		bodyTokens = bodyTokens[1 : len(bodyTokens)-1]
+	}
+	if hasBodyBrace && len(bodyTokens) >= 2 && bodyTokens[0].t == tokLBrace {
+		bodyTokens = extractReturnFromBlock(bodyTokens)
+	}
+	bodyTokens = append(bodyTokens, tok{t: tokEOF})
+
+	arr := val.array
+	startIdx := 0
+	if accumulator == nil {
+		if len(arr) == 0 {
+			return jvUndefined
+		}
+		accumulator = arr[0]
+		startIdx = 1
+	}
+
+	accParam := "acc"
+	itemParam := "item"
+	if len(params) > 0 {
+		accParam = params[0]
+	}
+	if len(params) > 1 {
+		itemParam = params[1]
+	}
+
+	for i := startIdx; i < len(arr); i++ {
+		childScope := getPooledScope(e.scope)
+		childScope[accParam] = accumulator
+		childScope[itemParam] = arr[i]
+		if len(params) > 2 {
+			childScope[params[2]] = jvNum(float64(i))
+		}
+		childEval := &jsEval{tokens: bodyTokens, pos: 0, scope: childScope}
+		accumulator = childEval.expr()
+		putPooledScope(childScope)
+	}
+
+	return accumulator
+}
+
+func sortJSValues(arr []*jsValue) {
+	// Simple insertion sort by string representation
+	for i := 1; i < len(arr); i++ {
+		key := arr[i]
+		keyStr := key.toStr()
+		j := i - 1
+		for j >= 0 && arr[j].toStr() > keyStr {
+			arr[j+1] = arr[j]
+			j--
+		}
+		arr[j+1] = key
+	}
+}
+
+func flattenArray(arr []*jsValue, depth int) []*jsValue {
+	if depth <= 0 {
+		return arr
+	}
+	var result []*jsValue
+	for _, item := range arr {
+		if item.typ == jsTypeArray {
+			result = append(result, flattenArray(item.array, depth-1)...)
+		} else {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 func extractReturnFromBlock(tokens []tok) []tok {
 	// Strip outer { }
 	if len(tokens) < 2 {
@@ -1550,18 +1962,60 @@ func (e *jsEval) primary() *jsValue {
 			if e.peek().t == tokDot {
 				e.advance()
 				method := e.advance()
-				if method.v == "keys" && e.peek().t == tokLParen {
+				if e.peek().t == tokLParen {
 					e.advance()
 					arg := e.expr()
-					e.expect(tokRParen)
-					if arg.typ == jsTypeObject && arg.object != nil {
-						keys := make([]*jsValue, 0, len(arg.object))
-						for k := range arg.object {
-							keys = append(keys, jvStr(k))
-						}
-						return jvArr(keys)
+					// Check for second arg (Object.assign)
+					var extraArgs []*jsValue
+					for e.peek().t == tokComma {
+						e.advance()
+						extraArgs = append(extraArgs, e.expr())
 					}
-					return jvArr(nil)
+					e.expect(tokRParen)
+					switch method.v {
+					case "keys":
+						if arg.typ == jsTypeObject && arg.object != nil {
+							keys := make([]*jsValue, 0, len(arg.object))
+							for k := range arg.object {
+								keys = append(keys, jvStr(k))
+							}
+							return jvArr(keys)
+						}
+						return jvArr(nil)
+					case "values":
+						if arg.typ == jsTypeObject && arg.object != nil {
+							vals := make([]*jsValue, 0, len(arg.object))
+							for _, v := range arg.object {
+								vals = append(vals, v)
+							}
+							return jvArr(vals)
+						}
+						return jvArr(nil)
+					case "entries":
+						if arg.typ == jsTypeObject && arg.object != nil {
+							entries := make([]*jsValue, 0, len(arg.object))
+							for k, v := range arg.object {
+								entries = append(entries, jvArr([]*jsValue{jvStr(k), v}))
+							}
+							return jvArr(entries)
+						}
+						return jvArr(nil)
+					case "assign":
+						target := arg
+						if target.typ != jsTypeObject || target.object == nil {
+							target = &jsValue{typ: jsTypeObject, object: make(map[string]*jsValue)}
+						}
+						for _, src := range extraArgs {
+							if src.typ == jsTypeObject && src.object != nil {
+								for k, v := range src.object {
+									target.object[k] = v
+								}
+							}
+						}
+						return target
+					case "freeze":
+						return arg // no-op in SSR
+					}
 				}
 			}
 			return jvUndefined

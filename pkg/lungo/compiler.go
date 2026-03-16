@@ -220,7 +220,7 @@ func (c *compiler) compileExpr() compiledExpr {
 }
 
 func (c *compiler) compileTernary() compiledExpr {
-	left := c.compileLogicalOr()
+	left := c.compileNullishCoalesce()
 	if c.peek().t == tokQuestion {
 		c.advance()
 		consequent := c.compileExpr()
@@ -240,6 +240,23 @@ func (c *compiler) compileTernary() compiledExpr {
 				return consequent(scope)
 			}
 			return jvNull
+		}
+	}
+	return left
+}
+
+func (c *compiler) compileNullishCoalesce() compiledExpr {
+	left := c.compileLogicalOr()
+	for c.peek().t == tokNullCoalesce {
+		c.advance()
+		right := c.compileLogicalOr()
+		prev := left
+		left = func(scope map[string]*jsValue) *jsValue {
+			l := prev(scope)
+			if l.typ == jsTypeNull || l.typ == jsTypeUndefined {
+				return right(scope)
+			}
+			return l
 		}
 	}
 	return left
@@ -647,6 +664,190 @@ func (c *compiler) compileMethodCall(obj compiledExpr, method string) compiledEx
 		return c.compileSomeCall(obj)
 	case "every":
 		return c.compileEveryCall(obj)
+	case "reduce":
+		return c.compileReduceCall(obj)
+	case "concat":
+		var args []compiledExpr
+		for c.peek().t != tokRParen {
+			args = append(args, c.compileExpr())
+			if c.peek().t == tokComma { c.advance() }
+		}
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			var result []*jsValue
+			arr := obj(scope)
+			if arr.typ == jsTypeArray { result = append(result, arr.array...) }
+			for _, a := range args {
+				v := a(scope)
+				if v.typ == jsTypeArray { result = append(result, v.array...) } else { result = append(result, v) }
+			}
+			return jvArr(result)
+		}
+	case "reverse":
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			arr := obj(scope)
+			if arr.typ != jsTypeArray { return arr }
+			n := len(arr.array)
+			result := make([]*jsValue, n)
+			for i, v := range arr.array { result[n-1-i] = v }
+			return jvArr(result)
+		}
+	case "flat":
+		var depthExpr compiledExpr
+		if c.peek().t != tokRParen { depthExpr = c.compileExpr() }
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			arr := obj(scope)
+			if arr.typ != jsTypeArray { return arr }
+			d := 1
+			if depthExpr != nil { d = int(depthExpr(scope).toNum()) }
+			return jvArr(flattenArray(arr.array, d))
+		}
+	case "flatMap":
+		return func(scope map[string]*jsValue) *jsValue { return jvArr(nil) } // fallback
+	case "sort":
+		// Skip comparator if present
+		for c.peek().t != tokRParen && c.peek().t != tokEOF {
+			c.compileExpr()
+			if c.peek().t == tokComma { c.advance() }
+		}
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			arr := obj(scope)
+			if arr.typ != jsTypeArray { return arr }
+			result := make([]*jsValue, len(arr.array))
+			copy(result, arr.array)
+			sortJSValues(result)
+			return jvArr(result)
+		}
+	case "replace":
+		search := c.compileExpr()
+		c.expect(tokComma)
+		repl := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			v := obj(scope)
+			if v.typ != jsTypeString { return v }
+			return jvStr(strings.Replace(v.str, search(scope).toStr(), repl(scope).toStr(), 1))
+		}
+	case "replaceAll":
+		search := c.compileExpr()
+		c.expect(tokComma)
+		repl := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			v := obj(scope)
+			if v.typ != jsTypeString { return v }
+			return jvStr(strings.ReplaceAll(v.str, search(scope).toStr(), repl(scope).toStr()))
+		}
+	case "startsWith":
+		arg := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			return jvBool(strings.HasPrefix(obj(scope).toStr(), arg(scope).toStr()))
+		}
+	case "endsWith":
+		arg := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			return jvBool(strings.HasSuffix(obj(scope).toStr(), arg(scope).toStr()))
+		}
+	case "repeat":
+		arg := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			n := int(arg(scope).toNum())
+			if n <= 0 { return jvStr("") }
+			return jvStr(strings.Repeat(obj(scope).toStr(), n))
+		}
+	case "toLowerCase":
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue { return jvStr(strings.ToLower(obj(scope).toStr())) }
+	case "toUpperCase":
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue { return jvStr(strings.ToUpper(obj(scope).toStr())) }
+	case "charAt":
+		arg := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			s := obj(scope).toStr()
+			idx := int(arg(scope).toNum())
+			if idx >= 0 && idx < len(s) { return jvStr(string(s[idx])) }
+			return jvStr("")
+		}
+	case "indexOf":
+		arg := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			v := obj(scope)
+			search := arg(scope)
+			if v.typ == jsTypeString { return jvNum(float64(strings.Index(v.str, search.toStr()))) }
+			if v.typ == jsTypeArray {
+				for i, item := range v.array { if jsStrictEqual(item, search) { return jvNum(float64(i)) } }
+			}
+			return jvNum(-1)
+		}
+	case "lastIndexOf":
+		arg := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			return jvNum(float64(strings.LastIndex(obj(scope).toStr(), arg(scope).toStr())))
+		}
+	case "substring":
+		startExpr := c.compileExpr()
+		var endExpr compiledExpr
+		if c.peek().t == tokComma { c.advance(); endExpr = c.compileExpr() }
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			s := obj(scope).toStr()
+			start := int(startExpr(scope).toNum())
+			end := len(s)
+			if endExpr != nil { end = int(endExpr(scope).toNum()) }
+			if start < 0 { start = 0 }; if end > len(s) { end = len(s) }; if start > end { start, end = end, start }
+			return jvStr(s[start:end])
+		}
+	case "trim":
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue { return jvStr(strings.TrimSpace(obj(scope).toStr())) }
+	case "trimStart", "trimLeft":
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue { return jvStr(strings.TrimLeft(obj(scope).toStr(), " \t\n\r")) }
+	case "trimEnd", "trimRight":
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue { return jvStr(strings.TrimRight(obj(scope).toStr(), " \t\n\r")) }
+	case "includes":
+		arg := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			v := obj(scope); a := arg(scope)
+			if v.typ == jsTypeString { return jvBool(strings.Contains(v.str, a.toStr())) }
+			if v.typ == jsTypeArray { for _, item := range v.array { if jsStrictEqual(item, a) { return jvTrue } } }
+			return jvFalse
+		}
+	case "slice":
+		startExpr := c.compileExpr()
+		var endExpr compiledExpr
+		if c.peek().t == tokComma { c.advance(); endExpr = c.compileExpr() }
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			v := obj(scope); s := int(startExpr(scope).toNum())
+			if v.typ == jsTypeArray {
+				arr := v.array; if s < 0 { s = len(arr) + s }; if s < 0 { s = 0 }
+				e := len(arr); if endExpr != nil { e = int(endExpr(scope).toNum()) }; if e > len(arr) { e = len(arr) }
+				if s >= e { return jvArr(nil) }; return jvArr(arr[s:e])
+			}
+			if v.typ == jsTypeString {
+				str := v.str; if s < 0 { s = len(str) + s }; if s < 0 { s = 0 }
+				e := len(str); if endExpr != nil { e = int(endExpr(scope).toNum()) }; if e > len(str) { e = len(str) }
+				if s >= e { return jvStr("") }; return jvStr(str[s:e])
+			}
+			return v
+		}
+	case "push", "pop", "shift":
+		for c.peek().t != tokRParen && c.peek().t != tokEOF { c.compileExpr(); if c.peek().t == tokComma { c.advance() } }
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
 	default:
 		// Unknown method — skip args
 		for c.peek().t != tokRParen && c.peek().t != tokEOF {
@@ -894,6 +1095,58 @@ func (c *compiler) compileEveryCall(arr compiledExpr) compiledExpr {
 	}
 }
 
+func (c *compiler) compileReduceCall(arr compiledExpr) compiledExpr {
+	params := c.parseCompilerArrowParams()
+	c.expect(tokArrow)
+	body := c.compileExpr()
+
+	var initExpr compiledExpr
+	if c.peek().t == tokComma {
+		c.advance()
+		initExpr = c.compileExpr()
+	}
+	c.expect(tokRParen)
+
+	return func(scope map[string]*jsValue) *jsValue {
+		arrVal := arr(scope)
+		if arrVal.typ != jsTypeArray || len(arrVal.array) == 0 {
+			if initExpr != nil {
+				return initExpr(scope)
+			}
+			return jvUndefined
+		}
+		accParam := "acc"
+		itemParam := "item"
+		if len(params) > 0 {
+			accParam = params[0]
+		}
+		if len(params) > 1 {
+			itemParam = params[1]
+		}
+
+		var acc *jsValue
+		startIdx := 0
+		if initExpr != nil {
+			acc = initExpr(scope)
+		} else {
+			acc = arrVal.array[0]
+			startIdx = 1
+		}
+
+		for i := startIdx; i < len(arrVal.array); i++ {
+			childScope := getPooledScope(scope)
+			childScope[accParam] = acc
+			childScope[itemParam] = arrVal.array[i]
+			if len(params) > 2 {
+				childScope[params[2]] = jvNum(float64(i))
+			}
+			acc = body(childScope)
+			putPooledScope(childScope)
+		}
+		return acc
+	}
+}
+
 func (c *compiler) parseCompilerArrowParams() []string {
 	var params []string
 	if c.peek().t == tokLParen {
@@ -1131,6 +1384,71 @@ func (c *compiler) compilePrimary() compiledExpr {
 		case "h":
 			c.advance()
 			return c.compileHCallExpr()
+		case "Object":
+			c.advance()
+			if c.peek().t == tokDot {
+				c.advance()
+				method := c.advance().v
+				if c.peek().t == tokLParen {
+					c.advance()
+					arg := c.compileExpr()
+					var extraArgs []compiledExpr
+					for c.peek().t == tokComma {
+						c.advance()
+						extraArgs = append(extraArgs, c.compileExpr())
+					}
+					c.expect(tokRParen)
+					switch method {
+					case "keys":
+						return func(scope map[string]*jsValue) *jsValue {
+							v := arg(scope)
+							if v.typ == jsTypeObject && v.object != nil {
+								keys := make([]*jsValue, 0, len(v.object))
+								for k := range v.object { keys = append(keys, jvStr(k)) }
+								return jvArr(keys)
+							}
+							return jvArr(nil)
+						}
+					case "values":
+						return func(scope map[string]*jsValue) *jsValue {
+							v := arg(scope)
+							if v.typ == jsTypeObject && v.object != nil {
+								vals := make([]*jsValue, 0, len(v.object))
+								for _, val := range v.object { vals = append(vals, val) }
+								return jvArr(vals)
+							}
+							return jvArr(nil)
+						}
+					case "entries":
+						return func(scope map[string]*jsValue) *jsValue {
+							v := arg(scope)
+							if v.typ == jsTypeObject && v.object != nil {
+								entries := make([]*jsValue, 0, len(v.object))
+								for k, val := range v.object { entries = append(entries, jvArr([]*jsValue{jvStr(k), val})) }
+								return jvArr(entries)
+							}
+							return jvArr(nil)
+						}
+					case "assign":
+						return func(scope map[string]*jsValue) *jsValue {
+							target := arg(scope)
+							if target.typ != jsTypeObject || target.object == nil {
+								target = &jsValue{typ: jsTypeObject, object: make(map[string]*jsValue)}
+							}
+							for _, ea := range extraArgs {
+								src := ea(scope)
+								if src.typ == jsTypeObject && src.object != nil {
+									for k, v := range src.object { target.object[k] = v }
+								}
+							}
+							return target
+						}
+					case "freeze":
+						return func(scope map[string]*jsValue) *jsValue { return arg(scope) }
+					}
+				}
+			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
 		case "Array":
 			c.advance()
 			if c.peek().t == tokDot {
