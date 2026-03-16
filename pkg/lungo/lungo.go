@@ -93,8 +93,43 @@ type htmlCacheEntry struct {
 	ttl       time.Duration // 0 = forever (static mode)
 }
 
+// loadEnvFile loads environment variables from a .env file.
+// Variables already set in the environment are NOT overwritten.
+// Supports KEY=VALUE, KEY="VALUE", KEY='VALUE', and # comments.
+func loadEnvFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		// Strip surrounding quotes
+		if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'')) {
+			val = val[1 : len(val)-1]
+		}
+		// Don't overwrite existing env vars
+		if os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
+	}
+}
+
 // New creates a new Lungo application.
+// Automatically loads .env file if present (like Next.js).
 func New(opts Options) *App {
+	// Load .env files (don't overwrite existing env vars)
+	loadEnvFile(".env.local")
+	loadEnvFile(".env")
+
 	if opts.AppDir == "" {
 		opts.AppDir = "./app"
 	}
