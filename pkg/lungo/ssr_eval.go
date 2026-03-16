@@ -237,8 +237,8 @@ func stubHooks(ev *jsEval) {
 
 // extractDefaultExport finds the default export function and returns its body and parameter string.
 func extractDefaultExport(source string) (body string, params string, err error) {
-	// Find "export default function"
-	idx := strings.Index(source, "export default function")
+	// Find "export default function" — but skip occurrences inside string literals
+	idx := indexOutsideStrings(source, "export default function")
 	if idx < 0 {
 		return "", "", fmt.Errorf("no default export function found")
 	}
@@ -376,6 +376,29 @@ func findMatchingParen(s string, start int) int {
 			if depth == 0 {
 				return i
 			}
+		}
+	}
+	return -1
+}
+
+// indexOutsideStrings finds the first occurrence of needle in s that is not
+// inside a string literal (single, double, or backtick quotes).
+func indexOutsideStrings(s, needle string) int {
+	inStr := byte(0)
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inStr != 0 {
+			if ch == inStr && (i == 0 || s[i-1] != '\\') {
+				inStr = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inStr = ch
+			continue
+		}
+		if i+len(needle) <= len(s) && s[i:i+len(needle)] == needle {
+			return i
 		}
 	}
 	return -1
