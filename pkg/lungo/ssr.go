@@ -42,12 +42,11 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	// Extract metadata from page
 	meta := a.extractMetadata(route.PagePath)
 
-	// Inline theme detection script to prevent flash of wrong theme
 	// Read theme cookie for SSR — render with correct theme to prevent flash
-	isDark := false
+	isDark := a.opts.DefaultTheme == "dark"
 	if r != nil {
-		if c, err := r.Cookie("theme"); err == nil && c.Value == "dark" {
-			isDark = true
+		if c, err := r.Cookie("theme"); err == nil {
+			isDark = c.Value == "dark"
 		}
 	}
 	if isDark {

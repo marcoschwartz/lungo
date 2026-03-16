@@ -37,6 +37,10 @@ type Options struct {
 	// Cache configures page-level HTML caching.
 	// If nil, all pages are rendered live (SSR) on every request.
 	Cache *CacheOptions
+
+	// DefaultTheme sets the SSR theme when no cookie is present.
+	// "dark" or "light" (default: "light").
+	DefaultTheme string
 }
 
 // CacheOptions configures page-level HTML caching.
