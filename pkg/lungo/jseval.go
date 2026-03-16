@@ -1268,6 +1268,49 @@ func (e *jsEval) skipBalanced(open, close tokType) {
 	}
 }
 
+// evalSingleStatement handles a single statement (like "return expr;") without braces.
+func (e *jsEval) evalSingleStatement() *jsValue {
+	if e.peek().t == tokIdent && e.peek().v == "return" {
+		e.advance() // skip "return"
+		val := e.expr()
+		// Skip optional semicolon
+		if e.peek().t == tokSemi {
+			e.advance()
+		}
+		return val
+	}
+	// Not a return — evaluate and discard
+	e.expr()
+	if e.peek().t == tokSemi {
+		e.advance()
+	}
+	return nil
+}
+
+// skipSingleStatement skips a single statement without braces (e.g., "return expr;").
+func (e *jsEval) skipSingleStatement() {
+	depth := 0
+	first := true
+	for e.peek().t != tokEOF {
+		t := e.peek()
+		if t.t == tokLParen || t.t == tokLBrace || t.t == tokLBrack {
+			depth++
+		} else if t.t == tokRParen || t.t == tokRBrace || t.t == tokRBrack {
+			depth--
+		}
+		if depth <= 0 && t.t == tokSemi {
+			e.advance() // consume semicolon
+			return
+		}
+		// After the first token, stop at statement keywords (don't consume)
+		if !first && depth <= 0 && t.t == tokIdent && (t.v == "return" || t.v == "const" || t.v == "let" || t.v == "var" || t.v == "if" || t.v == "else" || t.v == "for") {
+			return
+		}
+		first = false
+		e.advance()
+	}
+}
+
 func (e *jsEval) primary() *jsValue {
 	t := e.peek()
 
@@ -1721,6 +1764,12 @@ func (e *jsEval) evalStatements() *jsValue {
 					if result != nil {
 						return result // block had a return
 					}
+				} else if e.peek().t == tokIdent && e.peek().v == "return" {
+					// Single-statement if: if (cond) return expr;
+					result := e.evalSingleStatement()
+					if result != nil {
+						return result
+					}
 				}
 				// Skip else if present
 				if e.peek().t == tokIdent && e.peek().v == "else" {
@@ -1728,25 +1777,34 @@ func (e *jsEval) evalStatements() *jsValue {
 					if e.peek().t == tokLBrace {
 						e.skipBalanced(tokLBrace, tokRBrace)
 					} else if e.peek().t == tokIdent && e.peek().v == "if" {
-						// else if — skip the entire if chain
 						e.skipIfChain()
+					} else {
+						// else single-statement — skip it
+						e.skipSingleStatement()
 					}
 				}
 			} else {
 				// Skip the if block
 				if e.peek().t == tokLBrace {
 					e.skipBalanced(tokLBrace, tokRBrace)
+				} else {
+					// Skip single-statement if body
+					e.skipSingleStatement()
 				}
 				// Handle else
 				if e.peek().t == tokIdent && e.peek().v == "else" {
 					e.advance()
 					if e.peek().t == tokIdent && e.peek().v == "if" {
-						// else if — evaluate as new if
 						continue // loop will pick up "if" next iteration
 					}
 					if e.peek().t == tokLBrace {
 						e.advance() // skip {
 						result := e.evalBlock()
+						if result != nil {
+							return result
+						}
+					} else if e.peek().t == tokIdent && e.peek().v == "return" {
+						result := e.evalSingleStatement()
 						if result != nil {
 							return result
 						}

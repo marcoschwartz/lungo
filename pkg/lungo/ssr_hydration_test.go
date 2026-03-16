@@ -259,10 +259,8 @@ func TestHydration_UseMemo_BlockBody(t *testing.T) {
   return <div>{items.length}</div>;
 }`
 	html := ssrEvalInterpreted(t, src, `["a","b","c"]`)
-	// BUG: Should be <div>3</div> but evaluator returns 0 because
-	// the block body arrow with if/return is not fully evaluated.
-	// When this is fixed, change to: assertExact(t, html, `<div>3</div>`)
-	assertExact(t, html, `<div>0</div>`)
+	// Fixed: if/return without braces now works in the evaluator
+	assertExact(t, html, `<div>3</div>`)
 }
 
 func TestHydration_UseMemo_BlockBody_NullData(t *testing.T) {
