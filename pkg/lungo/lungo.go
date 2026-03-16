@@ -2,6 +2,7 @@
 package lungo
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Middleware is a function that wraps an http.Handler.
@@ -30,6 +33,42 @@ type Options struct {
 
 	// Dev enables hot module replacement and verbose logging.
 	Dev bool
+
+	// Cache configures page-level HTML caching.
+	// If nil, all pages are rendered live (SSR) on every request.
+	Cache *CacheOptions
+}
+
+// CacheOptions configures page-level HTML caching.
+type CacheOptions struct {
+	// DefaultMode is the default caching mode for pages.
+	// "static" = cache forever until revalidated
+	// "isr" = cache with TTL + stale-while-revalidate
+	// "ssr" = always render fresh (default if empty)
+	DefaultMode string
+
+	// DefaultTTL is the default TTL in seconds for ISR mode.
+	DefaultTTL int
+
+	// Rules defines per-path caching rules. More specific rules take priority.
+	Rules []CacheRule
+
+	// RevalidateSecret is the secret required to call /__revalidate.
+	// If empty, the endpoint is disabled.
+	RevalidateSecret string
+}
+
+// CacheRule configures caching for a specific path pattern.
+type CacheRule struct {
+	// Path pattern. Exact paths or wildcard with trailing *.
+	// Examples: "/", "/about", "/blog/*"
+	Path string
+
+	// Mode: "static", "isr", or "ssr"
+	Mode string
+
+	// TTL in seconds for ISR mode. 0 = use DefaultTTL.
+	TTL int
 }
 
 // App is the main Lungo application instance.
@@ -40,6 +79,14 @@ type App struct {
 	apiRoutes   map[string]http.HandlerFunc
 	middlewares []Middleware
 	hmr         *HMR
+	htmlCache   map[string]*htmlCacheEntry
+	htmlCacheMu sync.RWMutex
+}
+
+type htmlCacheEntry struct {
+	html      string
+	cachedAt  time.Time
+	ttl       time.Duration // 0 = forever (static mode)
 }
 
 // New creates a new Lungo application.
@@ -62,6 +109,7 @@ func New(opts Options) *App {
 	app := &App{
 		opts:      opts,
 		apiRoutes: make(map[string]http.HandlerFunc),
+		htmlCache: make(map[string]*htmlCacheEntry),
 	}
 
 	if opts.AppFS != nil {
@@ -164,7 +212,13 @@ func (a *App) buildHandler() http.Handler {
 			return
 		}
 
-		// 3. API routes
+		// 3. Revalidation endpoint
+		if path == "/__revalidate" && r.Method == http.MethodPost {
+			a.handleRevalidate(w, r)
+			return
+		}
+
+		// 4. API routes
 		for pattern, handler := range a.apiRoutes {
 			if path == pattern {
 				handler(w, r)
@@ -309,7 +363,187 @@ func (a *App) serveSSRWithRecovery(w http.ResponseWriter, r *http.Request) {
 		a.serveNotFound(w, r)
 		return
 	}
+
+	// Check page cache
+	if a.opts.Cache != nil && !a.opts.Dev {
+		mode, ttl := a.resolveCacheMode(r.URL.Path, route)
+		if mode == "static" || mode == "isr" {
+			if html, ok := a.getHTMLCache(r.URL.Path, mode); ok {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("X-Lungo-Cache", "HIT")
+				w.Write([]byte(html))
+				return
+			}
+			// Cache miss — render, cache, serve
+			html := a.renderPageFull(route, r)
+			a.setHTMLCache(r.URL.Path, html, ttl)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Lungo-Cache", "MISS")
+			w.Write([]byte(html))
+			return
+		}
+	}
+
 	a.serveSSR(w, r)
+}
+
+// resolveCacheMode determines the cache mode and TTL for a path.
+func (a *App) resolveCacheMode(urlPath string, route *Route) (string, time.Duration) {
+	if a.opts.Cache == nil {
+		return "ssr", 0
+	}
+
+	// Check specific rules (most specific first)
+	var bestMatch *CacheRule
+	bestLen := -1
+	for i := range a.opts.Cache.Rules {
+		rule := &a.opts.Cache.Rules[i]
+		if rule.Path == urlPath {
+			bestMatch = rule
+			break // exact match wins
+		}
+		if strings.HasSuffix(rule.Path, "/*") {
+			prefix := strings.TrimSuffix(rule.Path, "*")
+			if strings.HasPrefix(urlPath, prefix) && len(prefix) > bestLen {
+				bestMatch = rule
+				bestLen = len(prefix)
+			}
+		}
+	}
+
+	if bestMatch != nil {
+		ttl := time.Duration(bestMatch.TTL) * time.Second
+		if bestMatch.Mode == "isr" && ttl == 0 {
+			ttl = time.Duration(a.opts.Cache.DefaultTTL) * time.Second
+		}
+		return bestMatch.Mode, ttl
+	}
+
+	// Default mode
+	mode := a.opts.Cache.DefaultMode
+	if mode == "" {
+		mode = "ssr"
+	}
+	if mode == "isr" {
+		return mode, time.Duration(a.opts.Cache.DefaultTTL) * time.Second
+	}
+	return mode, 0
+}
+
+// getPageCache returns cached HTML if available and fresh.
+func (a *App) getHTMLCache(urlPath, mode string) (string, bool) {
+	a.htmlCacheMu.RLock()
+	entry, ok := a.htmlCache[urlPath]
+	a.htmlCacheMu.RUnlock()
+	if !ok {
+		return "", false
+	}
+
+	if mode == "static" {
+		// Static: cached forever until revalidated
+		return entry.html, true
+	}
+
+	// ISR: check TTL
+	if entry.ttl > 0 && time.Since(entry.cachedAt) > entry.ttl {
+		// Stale — serve stale, revalidate in background
+		go func() {
+			route := a.router.Match(urlPath)
+			if route != nil {
+				html := a.renderPageFull(route, nil)
+				a.setHTMLCache(urlPath, html, entry.ttl)
+				log.Printf("[Cache] revalidated %s in background", urlPath)
+			}
+		}()
+		return entry.html, true // serve stale
+	}
+
+	return entry.html, true
+}
+
+// setPageCache stores rendered HTML in the cache.
+func (a *App) setHTMLCache(urlPath, html string, ttl time.Duration) {
+	a.htmlCacheMu.Lock()
+	a.htmlCache[urlPath] = &htmlCacheEntry{
+		html:     html,
+		cachedAt: time.Now(),
+		ttl:      ttl,
+	}
+	a.htmlCacheMu.Unlock()
+	log.Printf("[Cache] cached %s (ttl=%v)", urlPath, ttl)
+}
+
+// renderPageFull renders a page to full HTML string.
+func (a *App) renderPageFull(route *Route, r *http.Request) string {
+	var loaderData json.RawMessage
+	if route.HasLoader && route.LoaderURL != "" {
+		loaderData = a.fetchLoaderData(route, r)
+	}
+	return a.renderPage(route, loaderData, r)
+}
+
+// handleRevalidate handles POST /__revalidate requests.
+func (a *App) handleRevalidate(w http.ResponseWriter, r *http.Request) {
+	if a.opts.Cache == nil || a.opts.Cache.RevalidateSecret == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Check auth
+	auth := r.Header.Get("Authorization")
+	if auth != "Bearer "+a.opts.Cache.RevalidateSecret {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	var revalidated []string
+
+	// Revalidate specific paths
+	paths := r.URL.Query()["path"]
+	for _, p := range paths {
+		a.htmlCacheMu.Lock()
+		delete(a.htmlCache, p)
+		a.htmlCacheMu.Unlock()
+		revalidated = append(revalidated, p)
+	}
+
+	// Revalidate by pattern
+	patterns := r.URL.Query()["pattern"]
+	for _, pattern := range patterns {
+		prefix := strings.TrimSuffix(pattern, "*")
+		a.htmlCacheMu.Lock()
+		for path := range a.htmlCache {
+			if strings.HasPrefix(path, prefix) {
+				delete(a.htmlCache, path)
+				revalidated = append(revalidated, path)
+			}
+		}
+		a.htmlCacheMu.Unlock()
+	}
+
+	// "all" flag clears everything
+	if r.URL.Query().Get("all") == "true" {
+		a.htmlCacheMu.Lock()
+		count := len(a.htmlCache)
+		a.htmlCache = make(map[string]*htmlCacheEntry)
+		a.htmlCacheMu.Unlock()
+		log.Printf("[Cache] revalidated all (%d pages)", count)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"revalidated": count,
+			"all":         true,
+			"ok":          true,
+		})
+		return
+	}
+
+	log.Printf("[Cache] revalidated: %v", revalidated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"revalidated": revalidated,
+		"ok":          true,
+	})
 }
 
 func detectContentType(name string) string {

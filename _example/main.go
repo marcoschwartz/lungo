@@ -38,6 +38,27 @@ func main() {
 		opts.StaticFS = staticSub
 	}
 
+	opts.Cache = &lungo.CacheOptions{
+		DefaultMode: "ssr", // default: render fresh
+		Rules: []lungo.CacheRule{
+			// Static pages — cached forever, revalidate on demand
+			{Path: "/", Mode: "static"},
+			{Path: "/about", Mode: "static"},
+			{Path: "/contact", Mode: "static"},
+			{Path: "/demos", Mode: "static"},
+			{Path: "/animations", Mode: "static"},
+			{Path: "/jsx-demo", Mode: "static"},
+
+			// ISR pages — cached with TTL, stale-while-revalidate
+			{Path: "/blog/*", Mode: "isr", TTL: 60},
+			{Path: "/posts", Mode: "isr", TTL: 30},
+
+			// SSR pages — always fresh (explicit, same as default)
+			{Path: "/live", Mode: "ssr"},
+		},
+		RevalidateSecret: "lungo-example-secret",
+	}
+
 	app := lungo.New(opts)
 
 	// ── Middleware ──────────────────────────────────────────────────
