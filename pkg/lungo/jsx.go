@@ -230,9 +230,12 @@ func (t *jsxTranspiler) parseJSXChildren(closeTag string) []string {
 		if ch == '{' {
 			t.pos++
 			expr := t.parseJSXExpression()
-			if strings.TrimSpace(expr) != "" {
-				children = append(children, strings.TrimSpace(expr))
+			trimmed := strings.TrimSpace(expr)
+			// Skip JSX comments: {/* ... */}
+			if trimmed == "" || isBlockComment(trimmed) {
+				continue
 			}
+			children = append(children, trimmed)
 			continue
 		}
 
@@ -567,6 +570,27 @@ func collapseWhitespace(s string) string {
 		result = result + " "
 	}
 	return result
+}
+
+// isBlockComment returns true if the string is only block comments and whitespace.
+func isBlockComment(s string) bool {
+	i := 0
+	for i < len(s) {
+		if s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' {
+			i++
+			continue
+		}
+		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
+			end := strings.Index(s[i+2:], "*/")
+			if end == -1 {
+				return false
+			}
+			i = i + 2 + end + 2
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func escapeJSString(s string) string {
