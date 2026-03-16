@@ -56,6 +56,61 @@ func TestJSXCommentOnlyChild(t *testing.T) {
 	}
 }
 
+func TestPreTagPreservesWhitespace(t *testing.T) {
+	input := `function App() { return (<pre>line one
+line two
+line three</pre>); }`
+	out := TranspileJSX(input)
+	t.Logf("Output: %s", out)
+	if !strings.Contains(out, `\n`) {
+		t.Errorf("pre tag should preserve newlines, got: %s", out)
+	}
+	if strings.Contains(out, "line one line two") {
+		t.Errorf("pre tag should not collapse whitespace, got: %s", out)
+	}
+}
+
+func TestPreTagWithChildElements(t *testing.T) {
+	input := `function App() { return (<pre><code><span>$</span> mkdir app
+<span>$</span> go run .</code></pre>); }`
+	out := TranspileJSX(input)
+	t.Logf("Output: %s", out)
+	// The text between </span> and <span> should contain a newline, not collapsed
+	if !strings.Contains(out, `\n`) {
+		t.Errorf("pre tag should preserve newlines between child elements, got: %s", out)
+	}
+}
+
+func TestPreTagVsDiv(t *testing.T) {
+	// In a div, newlines should collapse
+	divInput := `function App() { return (<div>hello
+world</div>); }`
+	divOut := TranspileJSX(divInput)
+	t.Logf("Div output: %s", divOut)
+	if strings.Contains(divOut, `\n`) {
+		t.Errorf("div should collapse newlines, got: %s", divOut)
+	}
+
+	// In a pre, newlines should be preserved
+	preInput := `function App() { return (<pre>hello
+world</pre>); }`
+	preOut := TranspileJSX(preInput)
+	t.Logf("Pre output: %s", preOut)
+	if !strings.Contains(preOut, `\n`) {
+		t.Errorf("pre should preserve newlines, got: %s", preOut)
+	}
+}
+
+func TestTextareaPreservesWhitespace(t *testing.T) {
+	input := `function App() { return (<textarea>line one
+line two</textarea>); }`
+	out := TranspileJSX(input)
+	t.Logf("Output: %s", out)
+	if !strings.Contains(out, `\n`) {
+		t.Errorf("textarea should preserve newlines, got: %s", out)
+	}
+}
+
 func TestIsBlockComment(t *testing.T) {
 	tests := []struct {
 		input    string

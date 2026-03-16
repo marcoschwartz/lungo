@@ -19,8 +19,9 @@ func TranspileJSX(source string) string {
 }
 
 type jsxTranspiler struct {
-	src string
-	pos int
+	src        string
+	pos        int
+	preDepth   int // tracks nesting inside <pre>/<textarea> for whitespace preservation
 }
 
 func (t *jsxTranspiler) transpile() string {
@@ -86,7 +87,7 @@ func (t *jsxTranspiler) parseJSXElement() string {
 	// Fragment: <>...</>
 	if t.pos < len(t.src) && t.src[t.pos] == '>' {
 		t.pos++ // skip >
-		children := t.parseJSXChildren("</>")
+		children := t.parseJSXChildren("</>", false)
 		return "h(null, null" + formatChildren(children) + ")"
 	}
 
@@ -113,7 +114,14 @@ func (t *jsxTranspiler) parseJSXElement() string {
 
 	// Parse children until closing tag
 	closeTag := "</" + tag + ">"
-	children := t.parseJSXChildren(closeTag)
+	// Track nesting inside preformatted tags
+	if tag == "pre" || tag == "textarea" {
+		t.preDepth++
+	}
+	children := t.parseJSXChildren(closeTag, t.preDepth > 0)
+	if tag == "pre" || tag == "textarea" {
+		t.preDepth--
+	}
 
 	return formatHCall(tag, attrs, children)
 }
@@ -208,7 +216,7 @@ func (t *jsxTranspiler) parseAttrName() string {
 	return t.src[start:t.pos]
 }
 
-func (t *jsxTranspiler) parseJSXChildren(closeTag string) []string {
+func (t *jsxTranspiler) parseJSXChildren(closeTag string, preserveWhitespace bool) []string {
 	var children []string
 
 	for t.pos < len(t.src) {
@@ -246,13 +254,19 @@ func (t *jsxTranspiler) parseJSXChildren(closeTag string) []string {
 			continue
 		}
 
-		// Text content — preserve meaningful whitespace between inline elements
+		// Text content
 		text := t.parseTextContent()
-		if strings.TrimSpace(text) != "" {
-			// Collapse internal whitespace (newlines, tabs, multiple spaces) to single spaces
-			// but preserve a leading/trailing space if the original had one
-			collapsed := collapseWhitespace(text)
-			children = append(children, `"`+escapeJSString(collapsed)+`"`)
+		if preserveWhitespace {
+			// Inside <pre>/<textarea>: preserve all whitespace including newlines
+			if text != "" {
+				children = append(children, `"`+escapeJSString(text)+`"`)
+			}
+		} else {
+			if strings.TrimSpace(text) != "" {
+				// Collapse internal whitespace (newlines, tabs, multiple spaces) to single spaces
+				collapsed := collapseWhitespace(text)
+				children = append(children, `"`+escapeJSString(collapsed)+`"`)
+			}
 		}
 	}
 
