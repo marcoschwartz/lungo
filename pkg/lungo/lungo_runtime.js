@@ -856,6 +856,11 @@
         currentPath = url;
         setPath(url);
       },
+      refresh() {
+        // Force re-fetch of page + layout data without URL change
+        window.__LUNGO_REFRESH__ = true;
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      },
     };
   }
 
@@ -1012,9 +1017,23 @@
     const initialPath = useRef(window.__LUNGO_INITIAL_PATH__);
     const navId = useRef(0); // prevents stale async updates
 
+    // Track layout data for refresh
+    const [layoutData, setLayoutData] = useState(() => {
+      const ld = {};
+      for (const l of layouts) {
+        if (l && l.data) ld[l] = l.data;
+      }
+      return ld;
+    });
+
     useEffect(() => {
+      const isRefresh = window.__LUNGO_REFRESH__;
+      if (isRefresh) {
+        delete window.__LUNGO_REFRESH__;
+      }
+
       // Skip on initial render — SSR already loaded this page
-      if (router.pathname === initialPath.current) {
+      if (!isRefresh && router.pathname === initialPath.current) {
         initialPath.current = null;
         restoreScroll(router.pathname);
         return;
@@ -1040,18 +1059,47 @@
 
       const loadPage = async () => {
         try {
-          // Load module and data in parallel
-          const [mod, loaderData] = await Promise.all([
-            pageModuleCache.get(matched.pagePath)
-              ? Promise.resolve(pageModuleCache.get(matched.pagePath))
-              : import(matched.pagePath).then(m => { pageModuleCache.set(matched.pagePath, m); return m; }),
+          // Load module, page data, and layout data in parallel
+          const fetches = [
+            isRefresh
+              ? Promise.resolve(pageModuleCache.get(matched.pagePath) || import(matched.pagePath))
+              : (pageModuleCache.get(matched.pagePath)
+                ? Promise.resolve(pageModuleCache.get(matched.pagePath))
+                : import(matched.pagePath).then(m => { pageModuleCache.set(matched.pagePath, m); return m; })),
             fetch("/_data" + router.pathname)
               .then(r => r.ok ? r.json() : {})
               .catch(() => ({})),
-          ]);
+          ];
+
+          // On refresh, also re-fetch layout loader data
+          const layoutURLs = window.__LUNGO_LAYOUTS__ || [];
+          if (isRefresh && layoutURLs.length > 0) {
+            fetches.push(
+              fetch("/_data" + router.pathname + "?_layouts=1")
+                .then(r => r.ok ? r.json() : null)
+                .catch(() => null)
+            );
+          }
+
+          const results = await Promise.all(fetches);
+          const mod = results[0];
+          const loaderData = results[1];
+          const newLayoutData = results[2] || null;
 
           // Ignore if a newer navigation happened while we were loading
           if (thisNav !== navId.current) return;
+
+          // Update layout data if refreshed
+          if (newLayoutData) {
+            for (const entry of layouts) {
+              if (entry && entry.component) {
+                const layoutPath = Object.keys(newLayoutData).find(k => newLayoutData[k]);
+                if (layoutPath) {
+                  entry.data = newLayoutData[layoutPath];
+                }
+              }
+            }
+          }
 
           // Swap everything in one state update — old page stays visible until now
           setView({
@@ -1062,7 +1110,7 @@
           });
 
           // Restore or reset scroll after render
-          requestAnimationFrame(() => restoreScroll(router.pathname));
+          if (!isRefresh) requestAnimationFrame(() => restoreScroll(router.pathname));
         } catch (err) {
           if (thisNav !== navId.current) return;
           setView(prev => ({ ...prev, error: err.message || "Failed to load page" }));

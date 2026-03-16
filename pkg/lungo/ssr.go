@@ -385,14 +385,26 @@ func (a *App) serveLoaderData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	route := a.router.Match(urlPath)
+	w.Header().Set("Content-Type", "application/json")
+
+	// Layout data request: /_data/path?_layouts=1
+	if r.URL.Query().Get("_layouts") == "1" && route != nil && route.LayoutLoaders != nil {
+		layoutData := make(map[string]json.RawMessage)
+		for path, sources := range route.LayoutLoaders {
+			data := a.fetchLayoutLoaderData(sources, r)
+			layoutData[pageURL(path)] = data
+		}
+		result, _ := json.Marshal(layoutData)
+		w.Write(result)
+		return
+	}
+
 	if route == nil || !route.HasLoader {
-		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte("{}"))
 		return
 	}
 
 	data := a.fetchLoaderData(route, r)
-	w.Header().Set("Content-Type", "application/json")
 	if data == nil {
 		w.Write([]byte("{}"))
 	} else {
