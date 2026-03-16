@@ -26,6 +26,8 @@ type Route struct {
 	HasLoader   bool
 	LoaderURL   string         // kept for backwards compat (single source)
 	Loaders     []LoaderSource // multi-source loaders
+	// LayoutLoaders maps layout paths to their loaders (nil if no loader).
+	LayoutLoaders map[string][]LoaderSource
 }
 
 // Router handles file-based routing.
@@ -261,16 +263,30 @@ func (r *Router) Match(urlPath string) *Route {
 	for _, entry := range r.routes {
 		if segments, ok := matchPattern(entry.pattern, urlPath); ok {
 			hasLoader, loaderURL, loaders := r.detectLoader(entry.pagePath)
+
+			// Detect layout loaders
+			var layoutLoaders map[string][]LoaderSource
+			for _, layoutPath := range entry.layouts {
+				hasLL, _, llSources := r.detectLoader(layoutPath)
+				if hasLL && len(llSources) > 0 {
+					if layoutLoaders == nil {
+						layoutLoaders = make(map[string][]LoaderSource)
+					}
+					layoutLoaders[layoutPath] = llSources
+				}
+			}
+
 			return &Route{
-				Pattern:     entry.pattern,
-				PagePath:    entry.pagePath,
-				Layouts:     entry.layouts,
-				LoadingPath: entry.loadingPath,
-				ErrorPath:   entry.errorPath,
-				Segments:    segments,
-				HasLoader:   hasLoader,
-				LoaderURL:   loaderURL,
-				Loaders:     loaders,
+				Pattern:       entry.pattern,
+				PagePath:      entry.pagePath,
+				Layouts:       entry.layouts,
+				LoadingPath:   entry.loadingPath,
+				ErrorPath:     entry.errorPath,
+				Segments:      segments,
+				HasLoader:     hasLoader,
+				LoaderURL:     loaderURL,
+				Loaders:       loaders,
+				LayoutLoaders: layoutLoaders,
 			}
 		}
 	}

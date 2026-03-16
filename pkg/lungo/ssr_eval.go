@@ -3,6 +3,7 @@ package lungo
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 )
@@ -155,13 +156,42 @@ func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, param
 	return RenderSSRHTMLPooled(result.vnode), interactive, nil
 }
 
-// wrapInLayouts evaluates each layout and wraps the page HTML inside it.
-// Layouts use hooks (useState, useEffect, useRouter) which we stub out.
-func (a *App) wrapInLayouts(pageHTML string, layouts []string, isDark bool, urlPath ...string) string {
-	for _, layoutPath := range layouts {
-		wrapped, err := a.evaluateLayout(layoutPath, pageHTML, isDark, urlPath...)
+// wrapInLayoutsWithData evaluates each layout, fetching loader data if defined.
+func (a *App) wrapInLayoutsWithData(pageHTML string, route *Route, isDark bool, r *http.Request) (string, map[string]json.RawMessage) {
+	layoutDataMap := make(map[string]json.RawMessage)
+	urlPath := route.Pattern
+	if r != nil {
+		urlPath = r.URL.Path
+	}
+
+	for _, layoutPath := range route.Layouts {
+		// Fetch layout loader data if defined
+		var layoutData json.RawMessage
+		if route.LayoutLoaders != nil {
+			if sources, ok := route.LayoutLoaders[layoutPath]; ok && len(sources) > 0 {
+				layoutData = a.fetchLayoutLoaderData(sources, r)
+				layoutDataMap[layoutPath] = layoutData
+			}
+		}
+
+		wrapped, err := a.evaluateLayoutWithData(layoutPath, pageHTML, isDark, urlPath, layoutData)
 		if err != nil {
-			// Layout eval failed — just return page content as-is
+			continue
+		}
+		pageHTML = wrapped
+	}
+	return pageHTML, layoutDataMap
+}
+
+// wrapInLayouts is the backwards-compatible version without loader data.
+func (a *App) wrapInLayouts(pageHTML string, layouts []string, isDark bool, urlPath ...string) string {
+	p := "/"
+	if len(urlPath) > 0 {
+		p = urlPath[0]
+	}
+	for _, layoutPath := range layouts {
+		wrapped, err := a.evaluateLayoutWithData(layoutPath, pageHTML, isDark, p, nil)
+		if err != nil {
 			continue
 		}
 		pageHTML = wrapped
@@ -169,8 +199,36 @@ func (a *App) wrapInLayouts(pageHTML string, layouts []string, isDark bool, urlP
 	return pageHTML
 }
 
-// evaluateLayout evaluates a layout component, injecting pageHTML as {children}.
-func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool, urlPath ...string) (string, error) {
+// fetchLayoutLoaderData fetches data for a layout's loader sources.
+func (a *App) fetchLayoutLoaderData(sources []LoaderSource, r *http.Request) json.RawMessage {
+	if len(sources) == 1 {
+		return a.callHandler(sources[0].URL, sources[0].URL, r)
+	}
+	// Multi-source: fetch in parallel, merge
+	results := make(map[string]json.RawMessage, len(sources))
+	type result struct {
+		key  string
+		data json.RawMessage
+	}
+	ch := make(chan result, len(sources))
+	for _, s := range sources {
+		go func(src LoaderSource) {
+			data := a.callHandler(src.URL, src.URL, r)
+			ch <- result{key: src.Key, data: data}
+		}(s)
+	}
+	for range sources {
+		res := <-ch
+		if res.key != "" {
+			results[res.key] = res.data
+		}
+	}
+	merged, _ := json.Marshal(results)
+	return merged
+}
+
+// evaluateLayoutWithData evaluates a layout component with optional loader data.
+func (a *App) evaluateLayoutWithData(layoutPath string, childrenHTML string, isDark bool, urlPath string, loaderData json.RawMessage) (string, error) {
 	cached, err := a.getPageCache(layoutPath)
 	if err != nil {
 		return "", err
@@ -190,7 +248,6 @@ func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool
 		scope["getInitialTheme"] = &jsValue{typ: jsTypeFunc, str: "__arrow", num: float64(themeID)}
 	}
 
-	// Stub out hooks — they return safe defaults
 	// children is a special vnode containing the pre-rendered page HTML
 	childrenNode := &ssrNode{
 		Tag:    "lungo-children",
@@ -198,12 +255,20 @@ func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool
 	}
 	scope["children"] = jvNode(childrenNode)
 
-	// Handle destructured params: function Layout({ children })
+	// Inject layout loader data
+	if loaderData != nil {
+		scope["data"] = jsonToJSValue(loaderData)
+	} else {
+		scope["data"] = jvNull
+	}
+
+	// Handle destructured params: function Layout({ children, data })
 	if strings.Contains(cached.funcParams, "{") {
-		// children already in scope
+		// children and data already in scope
 	} else if cached.funcParams != "" {
 		propsObj := make(map[string]*jsValue)
 		propsObj["children"] = scope["children"]
+		propsObj["data"] = scope["data"]
 		scope[cached.funcParams] = jvObj(propsObj)
 	}
 
@@ -211,11 +276,7 @@ func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool
 	tokens := make([]tok, len(cached.tokens))
 	copy(tokens, cached.tokens)
 	ev := &jsEval{tokens: tokens, pos: 0, scope: scope}
-	if len(urlPath) > 0 {
-		stubHooksWithPath(ev, urlPath[0])
-	} else {
-		stubHooks(ev)
-	}
+	stubHooksWithPath(ev, urlPath)
 
 	result := ev.evalStatements()
 	if result.typ != jsTypeVNode || result.vnode == nil {

@@ -72,13 +72,9 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	sb.WriteString(`<div id="root">`)
 	ssrHTML, _, ssrErr := a.evaluatePageSSR(route.PagePath, loaderData, route.Segments)
 	hasSSR := ssrErr == nil && ssrHTML != ""
+	var layoutDataMap map[string]json.RawMessage
 	if hasSSR {
-		// Wrap page content in layout(s), passing theme + URL path for correct SSR
-		urlPath := route.Pattern
-		if r != nil {
-			urlPath = r.URL.Path
-		}
-		ssrHTML = a.wrapInLayouts(ssrHTML, route.Layouts, isDark, urlPath)
+		ssrHTML, layoutDataMap = a.wrapInLayoutsWithData(ssrHTML, route, isDark, r)
 		sb.WriteString(ssrHTML)
 	} else {
 		sb.WriteString(a.renderLayoutShell(route))
@@ -113,6 +109,16 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	layoutsJSON, _ := json.Marshal(layoutURLs)
 	sb.WriteString(fmt.Sprintf("  window.__LUNGO_LAYOUTS__ = %s;\n", layoutsJSON))
 
+	// Embed layout loader data for client hydration
+	if len(layoutDataMap) > 0 {
+		clientLayoutData := make(map[string]json.RawMessage)
+		for path, data := range layoutDataMap {
+			clientLayoutData[pageURL(path)] = data
+		}
+		ldJSON, _ := json.Marshal(clientLayoutData)
+		sb.WriteString(fmt.Sprintf("  window.__LUNGO_LAYOUT_DATA__ = %s;\n", ldJSON))
+	}
+
 	sb.WriteString("</script>\n\n")
 
 	sb.WriteString(`<script src="/runtime/lungo.js"></script>`)
@@ -137,13 +143,15 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	sb.WriteString("  };\n")
 	sb.WriteString("  window.Lungo.__setInitialPage(initialPage.default, window.__LUNGO_DATA__ || {});\n\n")
 
-	// Collect layout components
+	// Collect layout components with their loader data
+	sb.WriteString("  const layoutData = window.__LUNGO_LAYOUT_DATA__ || {};\n")
 	sb.WriteString("  const layouts = [")
-	for i := range route.Layouts {
+	for i, l := range route.Layouts {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(fmt.Sprintf("layout%d.default", i))
+		lURL := pageURL(l)
+		sb.WriteString(fmt.Sprintf("{component: layout%d.default, data: layoutData['%s'] || null}", i, lURL))
 	}
 	sb.WriteString("];\n\n")
 

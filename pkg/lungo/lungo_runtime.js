@@ -1083,8 +1083,10 @@
         </div>
       </div>`;
       for (let i = layouts.length - 1; i >= 0; i--) {
-        const Layout = layouts[i];
-        content = h`<${Layout}>${content}<//>`;
+        const entry = layouts[i];
+        const Layout = entry && entry.component ? entry.component : entry;
+        const lData = entry && entry.data ? entry.data : null;
+        content = h`<${Layout} data=${lData}>${content}<//>`;
       }
       return content;
     }
@@ -1096,8 +1098,10 @@
     // Normal render: Page wrapped in Layouts (layouts persist, only Page swaps)
     let content = h`<${Page} data=${data} params=${params} />`;
     for (let i = layouts.length - 1; i >= 0; i--) {
-      const Layout = layouts[i];
-      content = h`<${Layout}>${content}<//>`;
+      const entry = layouts[i];
+      const Layout = entry && entry.component ? entry.component : entry;
+      const lData = entry && entry.data ? entry.data : null;
+      content = h`<${Layout} data=${lData}>${content}<//>`;
     }
     return content;
   }
