@@ -639,6 +639,14 @@ func (c *compiler) compileMethodCall(obj compiledExpr, method string) compiledEx
 		return func(scope map[string]*jsValue) *jsValue {
 			return jvStr(obj(scope).toStr())
 		}
+	case "find":
+		return c.compileFindCall(obj)
+	case "findIndex":
+		return c.compileFindIndexCall(obj)
+	case "some":
+		return c.compileSomeCall(obj)
+	case "every":
+		return c.compileEveryCall(obj)
 	default:
 		// Unknown method — skip args
 		for c.peek().t != tokRParen && c.peek().t != tokEOF {
@@ -767,6 +775,122 @@ func (c *compiler) compileFilterCall(arr compiledExpr) compiledExpr {
 			putPooledScope(childScope)
 		}
 		return jvArr(results)
+	}
+}
+
+func (c *compiler) compileFindCall(arr compiledExpr) compiledExpr {
+	params := c.parseCompilerArrowParams()
+	c.expect(tokArrow)
+	body := c.compileExpr()
+	c.expect(tokRParen)
+
+	return func(scope map[string]*jsValue) *jsValue {
+		arrVal := arr(scope)
+		if arrVal.typ != jsTypeArray {
+			return jvUndefined
+		}
+		for i, item := range arrVal.array {
+			childScope := getPooledScope(scope)
+			if len(params) > 0 {
+				childScope[params[0]] = item
+			}
+			if len(params) > 1 {
+				childScope[params[1]] = jvNum(float64(i))
+			}
+			found := body(childScope).truthy()
+			putPooledScope(childScope)
+			if found {
+				return item
+			}
+		}
+		return jvUndefined
+	}
+}
+
+func (c *compiler) compileFindIndexCall(arr compiledExpr) compiledExpr {
+	params := c.parseCompilerArrowParams()
+	c.expect(tokArrow)
+	body := c.compileExpr()
+	c.expect(tokRParen)
+
+	return func(scope map[string]*jsValue) *jsValue {
+		arrVal := arr(scope)
+		if arrVal.typ != jsTypeArray {
+			return jvNum(-1)
+		}
+		for i, item := range arrVal.array {
+			childScope := getPooledScope(scope)
+			if len(params) > 0 {
+				childScope[params[0]] = item
+			}
+			if len(params) > 1 {
+				childScope[params[1]] = jvNum(float64(i))
+			}
+			found := body(childScope).truthy()
+			putPooledScope(childScope)
+			if found {
+				return jvNum(float64(i))
+			}
+		}
+		return jvNum(-1)
+	}
+}
+
+func (c *compiler) compileSomeCall(arr compiledExpr) compiledExpr {
+	params := c.parseCompilerArrowParams()
+	c.expect(tokArrow)
+	body := c.compileExpr()
+	c.expect(tokRParen)
+
+	return func(scope map[string]*jsValue) *jsValue {
+		arrVal := arr(scope)
+		if arrVal.typ != jsTypeArray {
+			return jvFalse
+		}
+		for i, item := range arrVal.array {
+			childScope := getPooledScope(scope)
+			if len(params) > 0 {
+				childScope[params[0]] = item
+			}
+			if len(params) > 1 {
+				childScope[params[1]] = jvNum(float64(i))
+			}
+			match := body(childScope).truthy()
+			putPooledScope(childScope)
+			if match {
+				return jvTrue
+			}
+		}
+		return jvFalse
+	}
+}
+
+func (c *compiler) compileEveryCall(arr compiledExpr) compiledExpr {
+	params := c.parseCompilerArrowParams()
+	c.expect(tokArrow)
+	body := c.compileExpr()
+	c.expect(tokRParen)
+
+	return func(scope map[string]*jsValue) *jsValue {
+		arrVal := arr(scope)
+		if arrVal.typ != jsTypeArray {
+			return jvTrue
+		}
+		for i, item := range arrVal.array {
+			childScope := getPooledScope(scope)
+			if len(params) > 0 {
+				childScope[params[0]] = item
+			}
+			if len(params) > 1 {
+				childScope[params[1]] = jvNum(float64(i))
+			}
+			match := body(childScope).truthy()
+			putPooledScope(childScope)
+			if !match {
+				return jvFalse
+			}
+		}
+		return jvTrue
 	}
 }
 

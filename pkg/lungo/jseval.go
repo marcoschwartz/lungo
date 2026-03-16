@@ -971,6 +971,14 @@ func (e *jsEval) handleMethodCall(val *jsValue, method string) *jsValue {
 		return e.evalMapFilter(val, method)
 	case "filter":
 		return e.evalMapFilter(val, method)
+	case "find":
+		return e.evalFind(val)
+	case "findIndex":
+		return e.evalFindIndex(val)
+	case "some":
+		return e.evalSomeEvery(val, "some")
+	case "every":
+		return e.evalSomeEvery(val, "every")
 	case "join":
 		arg := jvStr(",")
 		if e.peek().t != tokRParen {
@@ -1209,6 +1217,130 @@ func (e *jsEval) evalMapFilter(val *jsValue, method string) *jsValue {
 	}
 
 	return jvArr(results)
+}
+
+// captureArrowCallback parses an arrow function callback inside a method call
+// (e.g. .find(p => ...) ) and returns the param name and prepared body tokens.
+// Caller must have already consumed the opening ( of the method call.
+func (e *jsEval) captureArrowCallback() (paramName string, bodyTokens []tok) {
+	params := e.parseArrowParams()
+	paramName = "item"
+	if len(params) > 0 {
+		paramName = params[0]
+	}
+	e.expect(tokArrow)
+
+	// Capture body tokens until the closing ) of the method call
+	bodyStart := e.pos
+	hasBodyParen := e.peek().t == tokLParen
+	hasBodyBrace := e.peek().t == tokLBrace
+	if hasBodyParen {
+		e.skipBalanced(tokLParen, tokRParen)
+	} else if hasBodyBrace {
+		e.skipBalanced(tokLBrace, tokRBrace)
+	} else {
+		depth := 1
+		for e.pos < len(e.tokens) {
+			if e.tokens[e.pos].t == tokLParen {
+				depth++
+			} else if e.tokens[e.pos].t == tokRParen {
+				depth--
+				if depth == 0 {
+					break
+				}
+			}
+			e.pos++
+		}
+	}
+	bodyEnd := e.pos
+	e.expect(tokRParen) // close method call
+
+	bodyTokens = make([]tok, bodyEnd-bodyStart)
+	copy(bodyTokens, e.tokens[bodyStart:bodyEnd])
+
+	if hasBodyParen && len(bodyTokens) >= 2 && bodyTokens[0].t == tokLParen {
+		bodyTokens = bodyTokens[1 : len(bodyTokens)-1]
+	}
+	if hasBodyBrace && len(bodyTokens) >= 2 && bodyTokens[0].t == tokLBrace {
+		bodyTokens = extractReturnFromBlock(bodyTokens)
+	}
+	bodyTokens = append(bodyTokens, tok{t: tokEOF})
+	return
+}
+
+// evalFind handles array.find(item => condition)
+func (e *jsEval) evalFind(val *jsValue) *jsValue {
+	if val.typ != jsTypeArray {
+		e.skipBalanced(tokLParen, tokRParen)
+		return jvUndefined
+	}
+
+	paramName, bodyTokens := e.captureArrowCallback()
+
+	for _, item := range val.array {
+		childScope := getPooledScope(e.scope)
+		childScope[paramName] = item
+		childEval := &jsEval{tokens: bodyTokens, pos: 0, scope: childScope}
+		result := childEval.expr()
+		putPooledScope(childScope)
+		if result.truthy() {
+			return item
+		}
+	}
+	return jvUndefined
+}
+
+// evalFindIndex handles array.findIndex(item => condition)
+func (e *jsEval) evalFindIndex(val *jsValue) *jsValue {
+	if val.typ != jsTypeArray {
+		e.skipBalanced(tokLParen, tokRParen)
+		return jvNum(-1)
+	}
+
+	paramName, bodyTokens := e.captureArrowCallback()
+
+	for i, item := range val.array {
+		childScope := getPooledScope(e.scope)
+		childScope[paramName] = item
+		childEval := &jsEval{tokens: bodyTokens, pos: 0, scope: childScope}
+		result := childEval.expr()
+		putPooledScope(childScope)
+		if result.truthy() {
+			return jvNum(float64(i))
+		}
+	}
+	return jvNum(-1)
+}
+
+// evalSomeEvery handles array.some/every(item => condition)
+func (e *jsEval) evalSomeEvery(val *jsValue, method string) *jsValue {
+	if val.typ != jsTypeArray {
+		e.skipBalanced(tokLParen, tokRParen)
+		if method == "every" {
+			return jvTrue
+		}
+		return jvFalse
+	}
+
+	paramName, bodyTokens := e.captureArrowCallback()
+
+	for _, item := range val.array {
+		childScope := getPooledScope(e.scope)
+		childScope[paramName] = item
+		childEval := &jsEval{tokens: bodyTokens, pos: 0, scope: childScope}
+		result := childEval.expr()
+		putPooledScope(childScope)
+		if method == "some" && result.truthy() {
+			return jvTrue
+		}
+		if method == "every" && !result.truthy() {
+			return jvFalse
+		}
+	}
+	if method == "some" {
+		return jvFalse
+	}
+	return jvTrue
 }
 
 func extractReturnFromBlock(tokens []tok) []tok {
