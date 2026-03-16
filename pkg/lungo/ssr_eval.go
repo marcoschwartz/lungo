@@ -11,11 +11,12 @@ import (
 // Caches transpiled + parsed page data so we don't redo it every request.
 
 type ssrPageCache struct {
-	funcBody   string
-	funcParams string
-	localFuncs map[string]*jsValue
-	tokens     []tok          // pre-tokenized function body
-	compiled   *compiledPage  // compiled closures (nil if compilation failed)
+	funcBody    string
+	funcParams  string
+	localFuncs  map[string]*jsValue
+	tokens      []tok          // pre-tokenized function body
+	compiled    *compiledPage  // compiled closures (nil if compilation failed)
+	interactive bool           // true if page has many hooks — use render() not hydrate()
 }
 
 var (
@@ -51,7 +52,14 @@ func (a *App) getPageCache(pagePath string) (*ssrPageCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read page: %w", err)
 	}
-	source := TranspileJSX(string(data))
+	rawSource := string(data)
+
+	// Detect interactive pages — too many hooks means hydration would mismatch,
+	// so we'll SSR the content but use render() instead of hydrate() on the client.
+	hookCount := strings.Count(rawSource, "useState")
+	isInteractive := hookCount > 3
+
+	source := TranspileJSX(rawSource)
 
 	funcBody, funcParams, err := extractDefaultExport(source)
 	if err != nil {
@@ -65,11 +73,12 @@ func (a *App) getPageCache(pagePath string) (*ssrPageCache, error) {
 	compiled := compilePageTokens(tokens, localFuncs)
 
 	entry := &ssrPageCache{
-		funcBody:   funcBody,
-		funcParams: funcParams,
-		localFuncs: localFuncs,
-		tokens:     tokens,
-		compiled:   compiled,
+		funcBody:    funcBody,
+		funcParams:  funcParams,
+		localFuncs:  localFuncs,
+		tokens:      tokens,
+		compiled:    compiled,
+		interactive: isInteractive,
 	}
 
 	if !a.opts.Dev {
@@ -85,10 +94,12 @@ func (a *App) getPageCache(pagePath string) (*ssrPageCache, error) {
 // It transpiles the JSX, evaluates the default export with the given data,
 // and returns the rendered HTML string.
 // Returns empty string and error if evaluation fails (caller should fall back).
-func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, params map[string]string) (string, error) {
+// evaluatePageSSR returns (html, interactive, error).
+// interactive=true means the page has many hooks and should use render() not hydrate().
+func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, params map[string]string) (string, bool, error) {
 	cached, err := a.getPageCache(pagePath)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	// Build scope (fresh per request — only data/params change)
@@ -121,11 +132,13 @@ func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, param
 		scope[cached.funcParams] = jvObj(propsObj)
 	}
 
+	interactive := cached.interactive
+
 	// Fast path: compiled closures → direct HTML (no vnode intermediary)
 	if cached.compiled != nil {
 		html := cached.compiled.renderHTML(scope)
 		if html != "" {
-			return html, nil
+			return html, interactive, nil
 		}
 	}
 
@@ -136,17 +149,17 @@ func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, param
 	result := ev.evalStatements()
 
 	if result.typ != jsTypeVNode || result.vnode == nil {
-		return "", fmt.Errorf("page did not return a vnode")
+		return "", false, fmt.Errorf("page did not return a vnode")
 	}
 
-	return RenderSSRHTMLPooled(result.vnode), nil
+	return RenderSSRHTMLPooled(result.vnode), interactive, nil
 }
 
 // wrapInLayouts evaluates each layout and wraps the page HTML inside it.
 // Layouts use hooks (useState, useEffect, useRouter) which we stub out.
-func (a *App) wrapInLayouts(pageHTML string, layouts []string) string {
+func (a *App) wrapInLayouts(pageHTML string, layouts []string, isDark bool) string {
 	for _, layoutPath := range layouts {
-		wrapped, err := a.evaluateLayout(layoutPath, pageHTML)
+		wrapped, err := a.evaluateLayout(layoutPath, pageHTML, isDark)
 		if err != nil {
 			// Layout eval failed — just return page content as-is
 			continue
@@ -157,7 +170,7 @@ func (a *App) wrapInLayouts(pageHTML string, layouts []string) string {
 }
 
 // evaluateLayout evaluates a layout component, injecting pageHTML as {children}.
-func (a *App) evaluateLayout(layoutPath string, childrenHTML string) (string, error) {
+func (a *App) evaluateLayout(layoutPath string, childrenHTML string, isDark bool) (string, error) {
 	cached, err := a.getPageCache(layoutPath)
 	if err != nil {
 		return "", err
@@ -166,6 +179,15 @@ func (a *App) evaluateLayout(layoutPath string, childrenHTML string) (string, er
 	scope := make(map[string]*jsValue, len(cached.localFuncs)+10)
 	for name, fn := range cached.localFuncs {
 		scope[name] = fn
+	}
+
+	// Override getInitialTheme to return the cookie value for correct SSR
+	if isDark {
+		themeID := registerArrow(&arrowFunc{
+			tokens: append(jsTokenize(`"dark"`), tok{t: tokEOF}),
+			scope:  make(map[string]*jsValue),
+		})
+		scope["getInitialTheme"] = &jsValue{typ: jsTypeFunc, str: "__arrow", num: float64(themeID)}
 	}
 
 	// Stub out hooks — they return safe defaults

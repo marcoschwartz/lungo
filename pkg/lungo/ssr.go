@@ -26,7 +26,7 @@ func (a *App) serveSSR(w http.ResponseWriter, r *http.Request) {
 		loaderData = a.fetchLoaderData(route, r)
 	}
 
-	html := a.renderPage(route, loaderData)
+	html := a.renderPage(route, loaderData, r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }
@@ -36,15 +36,26 @@ func pageURL(relPath string) string {
 	return "/app/" + relPath
 }
 
-func (a *App) renderPage(route *Route, loaderData json.RawMessage) string {
+func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Request) string {
 	var sb strings.Builder
 
 	// Extract metadata from page
 	meta := a.extractMetadata(route.PagePath)
 
 	// Inline theme detection script to prevent flash of wrong theme
-	sb.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n")
-	sb.WriteString("<script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(!t&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark')})()</script>\n")
+	// Read theme cookie for SSR — render with correct theme to prevent flash
+	isDark := false
+	if r != nil {
+		if c, err := r.Cookie("theme"); err == nil && c.Value == "dark" {
+			isDark = true
+		}
+	}
+	if isDark {
+		sb.WriteString("<!DOCTYPE html>\n<html lang=\"en\" class=\"dark\">\n")
+	} else {
+		sb.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n")
+	}
+	sb.WriteString("<script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(!t&&matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark');document.cookie='theme=dark;path=/;max-age=31536000'}else{document.cookie='theme=light;path=/;max-age=31536000'}})()</script>\n")
 	sb.WriteString("<head>\n")
 	sb.WriteString("  <meta charset=\"UTF-8\">\n")
 	sb.WriteString("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
@@ -60,11 +71,11 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage) string {
 	sb.WriteString("</head>\n<body>\n")
 
 	sb.WriteString(`<div id="root">`)
-	ssrHTML, ssrErr := a.evaluatePageSSR(route.PagePath, loaderData, route.Segments)
+	ssrHTML, _, ssrErr := a.evaluatePageSSR(route.PagePath, loaderData, route.Segments)
 	hasSSR := ssrErr == nil && ssrHTML != ""
 	if hasSSR {
-		// Wrap page content in layout(s)
-		ssrHTML = a.wrapInLayouts(ssrHTML, route.Layouts)
+		// Wrap page content in layout(s), passing theme for correct SSR
+		ssrHTML = a.wrapInLayouts(ssrHTML, route.Layouts, isDark)
 		sb.WriteString(ssrHTML)
 	} else {
 		sb.WriteString(a.renderLayoutShell(route))

@@ -27,6 +27,11 @@ type compiledStmt struct {
 	// Array destructuring: [name1, name2] = expr
 	IsArrayDestructure bool
 	Names              []string
+	// If statement
+	IsIf      bool
+	Condition compiledExpr
+	IfBody    *compiledPage   // statements inside if block (may contain return)
+	ElseBody  *compiledPage   // statements inside else block (may contain return)
 }
 
 // compiledNode is a pre-analyzed SSR vnode.
@@ -57,9 +62,34 @@ type compiledMap struct {
 // ─── Execution ──────────────────────────────────────────────────
 
 func (cp *compiledPage) execute(scope map[string]*jsValue) *jsValue {
-	// Run preamble (const declarations)
+	result := cp.executeStatements(scope)
+	if result != nil {
+		return result
+	}
+	if cp.ReturnExpr != nil {
+		return cp.ReturnExpr(scope)
+	}
+	return jvUndefined
+}
+
+func (cp *compiledPage) executeStatements(scope map[string]*jsValue) *jsValue {
 	for _, stmt := range cp.Preamble {
-		if stmt.IsArrayDestructure {
+		if stmt.IsIf {
+			// If statement — may contain return
+			if stmt.Condition(scope).truthy() {
+				if stmt.IfBody != nil {
+					result := stmt.IfBody.executeStatements(scope)
+					if result != nil {
+						return result // early return from if block
+					}
+				}
+			} else if stmt.ElseBody != nil {
+				result := stmt.ElseBody.executeStatements(scope)
+				if result != nil {
+					return result
+				}
+			}
+		} else if stmt.IsArrayDestructure {
 			val := stmt.Expr(scope)
 			if val.typ == jsTypeArray {
 				for i, name := range stmt.Names {
@@ -74,12 +104,11 @@ func (cp *compiledPage) execute(scope map[string]*jsValue) *jsValue {
 					scope[name] = jvUndefined
 				}
 			}
-		} else {
+		} else if stmt.Expr != nil {
 			scope[stmt.Name] = stmt.Expr(scope)
 		}
 	}
-	// Execute return expression
-	return cp.ReturnExpr(scope)
+	return nil // no return encountered
 }
 
 func (cn *compiledNode) execute(scope map[string]*jsValue) *ssrNode {
@@ -180,41 +209,26 @@ var sbPool = sync.Pool{
 // These methods write HTML directly to a Builder, avoiding ssrNode allocations.
 
 func (cp *compiledPage) renderHTML(scope map[string]*jsValue) string {
-	// Run preamble
-	for _, stmt := range cp.Preamble {
-		if stmt.IsArrayDestructure {
-			val := stmt.Expr(scope)
-			if val.typ == jsTypeArray {
-				for i, name := range stmt.Names {
-					if i < len(val.array) {
-						scope[name] = val.array[i]
-					} else {
-						scope[name] = jvUndefined
-					}
-				}
-			} else {
-				for _, name := range stmt.Names {
-					scope[name] = jvUndefined
-				}
-			}
-		} else {
-			scope[stmt.Name] = stmt.Expr(scope)
-		}
-	}
+	// Run preamble — may contain if statements with early returns
+	earlyResult := cp.executeStatements(scope)
 
 	sb := sbPool.Get().(*strings.Builder)
 	sb.Reset()
 
-	// Fast path: direct HTML rendering from compiled node tree
-	if cp.ReturnNode != nil {
+	// Check if an if-block returned early
+	var val *jsValue
+	if earlyResult != nil {
+		val = earlyResult
+	} else if cp.ReturnNode != nil {
+		// Fast path: direct HTML rendering from compiled node tree
 		cp.ReturnNode.renderDirectHTML(scope, sb)
 		result := sb.String()
 		sbPool.Put(sb)
 		return result
+	} else if cp.ReturnExpr != nil {
+		val = cp.ReturnExpr(scope)
 	}
 
-	// Fallback: execute to vnode then render
-	val := cp.ReturnExpr(scope)
 	if val == nil || val.typ != jsTypeVNode || val.vnode == nil {
 		sbPool.Put(sb)
 		return ""

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ─── Value Types ────────────────────────────────────────────────
@@ -145,6 +146,65 @@ func (v *jsValue) getProp(key string) *jsValue {
 		return jvUndefined
 	}
 	return jvUndefined
+}
+
+// ─── Arrow Function Registry ────────────────────────────────────
+// Stores captured arrow functions so they can be called later.
+
+type arrowFunc struct {
+	params  []string
+	tokens  []tok
+	isBlock bool
+	scope   map[string]*jsValue
+}
+
+var (
+	arrowRegistry   = make(map[int]*arrowFunc)
+	arrowNextID     int
+	arrowRegistryMu sync.Mutex
+)
+
+func registerArrow(af *arrowFunc) int {
+	arrowRegistryMu.Lock()
+	arrowNextID++
+	id := arrowNextID
+	arrowRegistry[id] = af
+	arrowRegistryMu.Unlock()
+	return id
+}
+
+func callArrow(id int, args []*jsValue, callerScope map[string]*jsValue) *jsValue {
+	arrowRegistryMu.Lock()
+	af, ok := arrowRegistry[id]
+	arrowRegistryMu.Unlock()
+	if !ok {
+		return jvUndefined
+	}
+
+	// Build child scope from captured scope + caller scope + args
+	childScope := make(map[string]*jsValue, len(callerScope)+len(af.params))
+	for k, v := range af.scope {
+		childScope[k] = v
+	}
+	for k, v := range callerScope {
+		childScope[k] = v
+	}
+	for i, name := range af.params {
+		if i < len(args) {
+			childScope[name] = args[i]
+		} else {
+			childScope[name] = jvUndefined
+		}
+	}
+
+	bodyTokens := make([]tok, len(af.tokens))
+	copy(bodyTokens, af.tokens)
+	ev := &jsEval{tokens: bodyTokens, pos: 0, scope: childScope}
+
+	if af.isBlock {
+		return ev.evalStatements()
+	}
+	return ev.expr()
 }
 
 // ─── Tokenizer ──────────────────────────────────────────────────
@@ -774,23 +834,48 @@ func (e *jsEval) isArrowFunction() bool {
 // parseArrowFunction parses an arrow function and returns it as a no-op func value.
 // For SSR, arrow functions in props (event handlers) are skipped.
 func (e *jsEval) parseArrowFunction() *jsValue {
-	// Skip params
 	e.advance() // skip (
+	// Collect params
+	var params []string
 	for e.peek().t != tokRParen && e.peek().t != tokEOF {
-		e.advance()
+		if e.peek().t == tokIdent {
+			params = append(params, e.advance().v)
+		} else {
+			e.advance()
+		}
 	}
 	e.expect(tokRParen)
-	e.expect(tokArrow) // skip =>
+	e.expect(tokArrow)
 
-	// Skip the body
-	if e.peek().t == tokLBrace {
-		e.skipBalanced(tokLBrace, tokRBrace)
-	} else {
-		// Expression body — skip one expression
-		e.expr()
+	// No-arg expression arrow: () => expr — evaluate immediately
+	if len(params) == 0 && e.peek().t != tokLBrace {
+		result := e.expr()
+		return &jsValue{typ: jsTypeFunc, str: "__resolved", fnParams: nil, object: map[string]*jsValue{"__value": result}}
 	}
 
-	return &jsValue{typ: jsTypeFunc, str: "__noop"}
+	// All other arrows (with params, or no-arg block body) — capture for later call
+	var bodyToks []tok
+	isBlock := false
+	if e.peek().t == tokLBrace {
+		isBlock = true
+		start := e.pos
+		e.skipBalanced(tokLBrace, tokRBrace)
+		// Copy tokens inside { } (excluding braces)
+		if e.pos-start > 2 {
+			bodyToks = make([]tok, e.pos-start-2)
+			copy(bodyToks, e.tokens[start+1:e.pos-1])
+		}
+	} else {
+		start := e.pos
+		e.expr()
+		bodyToks = make([]tok, e.pos-start)
+		copy(bodyToks, e.tokens[start:e.pos])
+	}
+	bodyToks = append(bodyToks, tok{t: tokEOF})
+
+	captured := &arrowFunc{params: params, tokens: bodyToks, isBlock: isBlock, scope: e.scope}
+	arrowID := registerArrow(captured)
+	return &jsValue{typ: jsTypeFunc, str: "__arrow", num: float64(arrowID)}
 }
 
 func (e *jsEval) evalFuncCall(fn *jsValue) *jsValue {
@@ -813,19 +898,22 @@ func (e *jsEval) evalFuncCall(fn *jsValue) *jsValue {
 		if len(args) > 0 {
 			initial = args[0]
 		}
-		// If initial is a function (lazy initializer), we can't call it — use false
-		if initial.typ == jsTypeFunc {
+		// Lazy initializer: useState(() => expr) — call to get the value
+		if initial.typ == jsTypeFunc && initial.str == "__resolved" && initial.object != nil {
+			if v, ok := initial.object["__value"]; ok {
+				initial = v
+			}
+		} else if initial.typ == jsTypeFunc && initial.str == "__arrow" {
+			initial = callArrow(int(initial.num), nil, e.scope)
+		} else if initial.typ == jsTypeFunc {
 			initial = jvFalse
 		}
-		// Return [value, setter] — setter is a no-op
 		return jvArr([]*jsValue{initial, &jsValue{typ: jsTypeFunc, str: "__noop"}})
 	}
 	if fn.str == "__hook_useEffect" {
-		// No-op — skip effect
 		return jvUndefined
 	}
 	if fn.str == "__hook_useRouter" {
-		// Return a stub router object
 		return jvObj(map[string]*jsValue{
 			"pathname": jvStr("/"),
 			"query":    jvObj(map[string]*jsValue{}),
@@ -839,14 +927,25 @@ func (e *jsEval) evalFuncCall(fn *jsValue) *jsValue {
 		return jvObj(map[string]*jsValue{"current": initial})
 	}
 	if fn.str == "__hook_useMemo" {
-		// Call the memo function
-		if len(args) > 0 && args[0].typ == jsTypeFunc {
-			// Can't easily call it, return undefined
+		// useMemo(() => expr, deps) — call the function to get the value
+		if len(args) > 0 {
+			memo := args[0]
+			if memo.typ == jsTypeFunc && memo.str == "__resolved" && memo.object != nil {
+				if v, ok := memo.object["__value"]; ok {
+					return v
+				}
+			}
+			if memo.typ == jsTypeFunc && memo.str == "__arrow" {
+				return callArrow(int(memo.num), nil, e.scope)
+			}
 		}
 		return jvUndefined
 	}
-	if fn.str == "__noop" {
+	if fn.str == "__noop" || fn.str == "__resolved" {
 		return jvUndefined
+	}
+	if fn.str == "__arrow" {
+		return callArrow(int(fn.num), args, e.scope)
 	}
 
 	return jvUndefined
@@ -952,14 +1051,77 @@ func (e *jsEval) handleMethodCall(val *jsValue, method string) *jsValue {
 	case "toString":
 		e.expect(tokRParen)
 		return jvStr(val.toStr())
+	case "padStart":
+		targetLen := 0
+		padStr := " "
+		if e.peek().t != tokRParen {
+			targetLen = int(e.expr().toNum())
+			if e.peek().t == tokComma {
+				e.advance()
+				padStr = e.expr().toStr()
+			}
+		}
+		e.expect(tokRParen)
+		s := val.toStr()
+		for len(s) < targetLen {
+			s = padStr + s
+		}
+		return jvStr(s)
+	case "padEnd":
+		targetLen := 0
+		padStr := " "
+		if e.peek().t != tokRParen {
+			targetLen = int(e.expr().toNum())
+			if e.peek().t == tokComma {
+				e.advance()
+				padStr = e.expr().toStr()
+			}
+		}
+		e.expect(tokRParen)
+		s := val.toStr()
+		for len(s) < targetLen {
+			s = s + padStr
+		}
+		return jvStr(s)
+	case "toFixed":
+		digits := 0
+		if e.peek().t != tokRParen {
+			digits = int(e.expr().toNum())
+		}
+		e.expect(tokRParen)
+		return jvStr(strconv.FormatFloat(val.toNum(), 'f', digits, 64))
 	case "isArray":
 		// Array.isArray(x)
 		arg := e.expr()
 		e.expect(tokRParen)
 		return jvBool(arg.typ == jsTypeArray)
 	default:
-		// unknown method — skip args and return undefined
-		e.skipBalanced(tokLParen, tokRParen)
+		// Check if method is a callable property on the object
+		if val.typ == jsTypeObject && val.object != nil {
+			if fn, ok := val.object[method]; ok && fn.typ == jsTypeFunc {
+				// ( already consumed by handleMethodCall — collect args and call
+				var args []*jsValue
+				for e.peek().t != tokRParen && e.peek().t != tokEOF {
+					args = append(args, e.expr())
+					if e.peek().t == tokComma {
+						e.advance()
+					}
+				}
+				e.expect(tokRParen)
+				if fn.str == "__arrow" {
+					return callArrow(int(fn.num), args, e.scope)
+				}
+				return jvUndefined
+			}
+		}
+		// Unknown method — skip args and return undefined
+		for e.peek().t != tokRParen && e.peek().t != tokEOF {
+			e.expr()
+			if e.peek().t == tokComma {
+				e.advance()
+			}
+		}
+		e.expect(tokRParen)
 		return jvUndefined
 	}
 }
@@ -1132,6 +1294,49 @@ func (e *jsEval) primary() *jsValue {
 
 	case tokIdent:
 		switch t.v {
+		case "new":
+			e.advance()
+			ctor := e.advance().v
+			if e.peek().t == tokLParen {
+				e.advance()
+				for e.peek().t != tokRParen && e.peek().t != tokEOF {
+					e.expr()
+					if e.peek().t == tokComma {
+						e.advance()
+					}
+				}
+				e.expect(tokRParen)
+				if ctor == "Date" {
+					noopStr := func(s string) *jsValue {
+						id := registerArrow(&arrowFunc{
+							tokens: append(jsTokenize(`"`+s+`"`), tok{t: tokEOF}),
+							scope:  make(map[string]*jsValue),
+						})
+						return &jsValue{typ: jsTypeFunc, str: "__arrow", num: float64(id)}
+					}
+					noopNum := func(n float64) *jsValue {
+						id := registerArrow(&arrowFunc{
+							tokens: append(jsTokenize(strconv.FormatFloat(n, 'f', -1, 64)), tok{t: tokEOF}),
+							scope:  make(map[string]*jsValue),
+						})
+						return &jsValue{typ: jsTypeFunc, str: "__arrow", num: float64(id)}
+					}
+					return jvObj(map[string]*jsValue{
+						"toLocaleTimeString": noopStr("00:00:00"),
+						"toLocaleDateString": noopStr("1/1/2026"),
+						"toISOString":        noopStr("2026-01-01T00:00:00.000Z"),
+						"toString":           noopStr("Thu Jan 01 2026"),
+						"getTime":            noopNum(0),
+						"getFullYear":        noopNum(2026),
+						"getMonth":           noopNum(0),
+						"getDate":            noopNum(1),
+						"getHours":           noopNum(0),
+						"getMinutes":         noopNum(0),
+						"getSeconds":         noopNum(0),
+					})
+				}
+			}
+			return jvUndefined
 		case "true":
 			e.advance()
 			return jvTrue
@@ -1193,6 +1398,74 @@ func (e *jsEval) primary() *jsValue {
 					b, _ := json.Marshal(jsValueToInterface(arg))
 					return jvStr(string(b))
 				}
+			}
+			return jvUndefined
+		case "Math":
+			e.advance()
+			if e.peek().t == tokDot {
+				e.advance()
+				method := e.advance().v
+				if e.peek().t == tokLParen {
+					e.advance()
+					arg := e.expr()
+					n := arg.toNum()
+					switch method {
+					case "floor":
+						e.expect(tokRParen)
+						return jvNum(float64(int64(n)))
+					case "ceil":
+						e.expect(tokRParen)
+						if n == float64(int64(n)) {
+							return jvNum(n)
+						}
+						return jvNum(float64(int64(n) + 1))
+					case "round":
+						e.expect(tokRParen)
+						return jvNum(float64(int64(n + 0.5)))
+					case "abs":
+						e.expect(tokRParen)
+						if n < 0 {
+							return jvNum(-n)
+						}
+						return jvNum(n)
+					case "min":
+						if e.peek().t == tokComma {
+							e.advance()
+							b := e.expr().toNum()
+							e.expect(tokRParen)
+							if n < b {
+								return jvNum(n)
+							}
+							return jvNum(b)
+						}
+						e.expect(tokRParen)
+						return jvNum(n)
+					case "max":
+						if e.peek().t == tokComma {
+							e.advance()
+							b := e.expr().toNum()
+							e.expect(tokRParen)
+							if n > b {
+								return jvNum(n)
+							}
+							return jvNum(b)
+						}
+						e.expect(tokRParen)
+						return jvNum(n)
+					case "random":
+						e.expect(tokRParen)
+						return jvNum(0)
+					}
+				}
+			}
+			return jvUndefined
+		case "String":
+			e.advance()
+			if e.peek().t == tokLParen {
+				e.advance()
+				arg := e.expr()
+				e.expect(tokRParen)
+				return jvStr(arg.toStr())
 			}
 			return jvUndefined
 		default:
@@ -1306,11 +1579,27 @@ func (e *jsEval) callFunc(fn *jsValue, props map[string]*jsValue) *jsValue {
 	for k, v := range e.scope {
 		childScope[k] = v
 	}
-	// If function has destructured params like { data, params }
+	// If function has destructured params like { data, params, max = 100 }
 	if len(fn.fnParams) == 1 && strings.HasPrefix(fn.fnParams[0], "{") {
-		// Destructured parameter — inject props directly
+		// Inject props
 		for k, v := range props {
 			childScope[k] = v
+		}
+		// Parse default values from the param string
+		paramStr := fn.fnParams[0]
+		paramStr = strings.TrimPrefix(paramStr, "{")
+		paramStr = strings.TrimSuffix(strings.TrimSpace(paramStr), "}")
+		for _, part := range strings.Split(paramStr, ",") {
+			part = strings.TrimSpace(part)
+			if eqIdx := strings.Index(part, "="); eqIdx > 0 {
+				name := strings.TrimSpace(part[:eqIdx])
+				if _, exists := childScope[name]; !exists {
+					// Apply default value
+					defaultStr := strings.TrimSpace(part[eqIdx+1:])
+					defaultVal := jsEvalExpr(defaultStr, childScope)
+					childScope[name] = defaultVal
+				}
+			}
 		}
 	} else if len(fn.fnParams) > 0 {
 		// Named parameter
@@ -1556,6 +1845,8 @@ func jsValueToNodes(v *jsValue) []*ssrNode {
 		}
 		return nil
 	case jsTypeString:
+		// Empty strings produce no DOM text node, so skip them in SSR.
+		// The hydrator handles the child count mismatch gracefully.
 		if v.str == "" {
 			return nil
 		}

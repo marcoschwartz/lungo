@@ -35,7 +35,7 @@ function TodoApp() {
   const remaining = todos.filter(t => !t.done).length;
 
   return (
-    <div class="border border-gray-200 rounded-xl p-6 bg-white">
+    <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-6 bg-white dark:bg-gray-900">
       <h3 class="text-lg font-bold mb-4">Todo App</h3>
       <form onsubmit={addTodo} class="flex gap-2 mb-4">
         <input
@@ -54,29 +54,29 @@ function TodoApp() {
             onclick={() => setFilter(f)}
             class={filter === f
               ? "px-3 py-1 text-xs rounded-full bg-blue-600 text-white"
-              : "px-3 py-1 text-xs rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200"}
+              : "px-3 py-1 text-xs rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"}
           >{f}</button>
         ))}
-        <span class="ml-auto text-xs text-gray-400">{remaining} remaining</span>
+        <span class="ml-auto text-xs text-gray-400 dark:text-gray-500">{remaining} remaining</span>
       </div>
 
       <div class="flex flex-col gap-1">
         {filtered.map(todo => (
-          <div class="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-gray-50 group">
+          <div class="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 group">
             <input
               type="checkbox"
               checked={todo.done}
               onchange={() => toggle(todo.id)}
               class="w-4 h-4 rounded"
             />
-            <span class={todo.done ? "line-through text-gray-400 flex-1" : "flex-1"}>{todo.text}</span>
+            <span class={todo.done ? "line-through text-gray-400 dark:text-gray-500 flex-1" : "flex-1"}>{todo.text}</span>
             <button
               onclick={() => remove(todo.id)}
               class="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 text-sm"
             >✕</button>
           </div>
         ))}
-        {filtered.length === 0 ? <p class="text-gray-400 text-sm py-4 text-center">No todos yet</p> : null}
+        {filtered.length === 0 ? <p class="text-gray-400 dark:text-gray-500 text-sm py-4 text-center">No todos yet</p> : null}
       </div>
     </div>
   );
@@ -88,14 +88,14 @@ function Tabs({ tabs }) {
   const [active, setActive] = useState(0);
 
   return (
-    <div class="border border-gray-200 rounded-xl overflow-hidden bg-white">
-      <div class="flex border-b border-gray-200">
+    <div class="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden bg-white dark:bg-gray-900">
+      <div class="flex border-b border-gray-200 dark:border-gray-700">
         {tabs.map((tab, i) => (
           <button
             onclick={() => setActive(i)}
             class={active === i
-              ? "flex-1 px-4 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-600 bg-blue-50"
-              : "flex-1 px-4 py-3 text-sm font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-50"}
+              ? "flex-1 px-4 py-3 text-sm font-medium text-blue-600 border-b-2 border-blue-600 bg-blue-50 dark:bg-blue-900/30"
+              : "flex-1 px-4 py-3 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"}
           >{tab.label}</button>
         ))}
       </div>
@@ -128,10 +128,10 @@ function Stopwatch() {
   const pad = (n) => String(n).padStart(2, "0");
 
   return (
-    <div class="border border-gray-200 rounded-xl p-6 bg-white text-center">
+    <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-6 bg-white dark:bg-gray-900 text-center">
       <h3 class="text-lg font-bold mb-4">Stopwatch</h3>
       <div class="text-5xl font-mono font-bold mb-6 tabular-nums tracking-tight">
-        {pad(mins)}:{pad(secs)}<span class="text-2xl text-gray-400">.{pad(ms)}</span>
+        {pad(mins)}:{pad(secs)}<span class="text-2xl text-gray-400 dark:text-gray-500">.{pad(ms)}</span>
       </div>
       <div class="flex gap-3 justify-center">
         <button
@@ -142,7 +142,7 @@ function Stopwatch() {
         >{running ? "Stop" : "Start"}</button>
         <button
           onclick={() => { setRunning(false); setTime(0); }}
-          class="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+          class="px-6 py-2 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300"
         >Reset</button>
       </div>
     </div>
@@ -159,25 +159,25 @@ function ColorPicker() {
   const color = "hsl(" + hue + ", " + sat + "%, " + light + "%)";
 
   return (
-    <div class="border border-gray-200 rounded-xl p-6 bg-white">
+    <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-6 bg-white dark:bg-gray-900">
       <h3 class="text-lg font-bold mb-4">Color Picker</h3>
-      <div class="w-full h-24 rounded-lg mb-4 border border-gray-200" style={{ backgroundColor: color }}></div>
-      <p class="text-center font-mono text-sm text-gray-500 mb-4">{color}</p>
+      <div class="w-full h-24 rounded-lg mb-4 border border-gray-200 dark:border-gray-700" style={{ backgroundColor: color }}></div>
+      <p class="text-center font-mono text-sm text-gray-500 dark:text-gray-400 mb-4">{color}</p>
       <div class="flex flex-col gap-3">
         <label class="flex items-center gap-3 text-sm">
-          <span class="w-16 text-gray-500">Hue</span>
+          <span class="w-16 text-gray-500 dark:text-gray-400">Hue</span>
           <input type="range" min="0" max="360" value={hue} oninput={(e) => setHue(+e.target.value)} class="flex-1" />
-          <span class="w-10 text-right font-mono text-gray-400">{hue}</span>
+          <span class="w-10 text-right font-mono text-gray-400 dark:text-gray-500">{hue}</span>
         </label>
         <label class="flex items-center gap-3 text-sm">
-          <span class="w-16 text-gray-500">Sat</span>
+          <span class="w-16 text-gray-500 dark:text-gray-400">Sat</span>
           <input type="range" min="0" max="100" value={sat} oninput={(e) => setSat(+e.target.value)} class="flex-1" />
-          <span class="w-10 text-right font-mono text-gray-400">{sat}%</span>
+          <span class="w-10 text-right font-mono text-gray-400 dark:text-gray-500">{sat}%</span>
         </label>
         <label class="flex items-center gap-3 text-sm">
-          <span class="w-16 text-gray-500">Light</span>
+          <span class="w-16 text-gray-500 dark:text-gray-400">Light</span>
           <input type="range" min="0" max="100" value={light} oninput={(e) => setLight(+e.target.value)} class="flex-1" />
-          <span class="w-10 text-right font-mono text-gray-400">{light}%</span>
+          <span class="w-10 text-right font-mono text-gray-400 dark:text-gray-500">{light}%</span>
         </label>
       </div>
     </div>
@@ -205,7 +205,7 @@ function DragList() {
   const onDragEnd = () => { setDragging(null); setOver(null); };
 
   return (
-    <div class="border border-gray-200 rounded-xl p-6 bg-white">
+    <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-6 bg-white dark:bg-gray-900">
       <h3 class="text-lg font-bold mb-4">Drag & Drop List</h3>
       <div class="flex flex-col gap-1">
         {items.map((item, i) => (
@@ -217,16 +217,16 @@ function DragList() {
             ondragend={onDragEnd}
             class={[
               "px-4 py-3 rounded-lg cursor-grab active:cursor-grabbing flex items-center gap-3 select-none transition-all",
-              dragging === i ? "opacity-50 bg-blue-50" : "bg-gray-50 hover:bg-gray-100",
+              dragging === i ? "opacity-50 bg-blue-50 dark:bg-blue-900/30" : "bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700",
               over === i && dragging !== i ? "border-t-2 border-blue-400" : "border-t-2 border-transparent"
             ].join(" ")}
           >
-            <span class="text-gray-400">☰</span>
+            <span class="text-gray-400 dark:text-gray-500">☰</span>
             <span>{item}</span>
           </div>
         ))}
       </div>
-      <p class="text-xs text-gray-400 mt-3">Drag items to reorder</p>
+      <p class="text-xs text-gray-400 dark:text-gray-500 mt-3">Drag items to reorder</p>
     </div>
   );
 }
@@ -298,7 +298,7 @@ function ChartDemo() {
   };
 
   return (
-    <div class="border border-gray-200 rounded-xl p-6 bg-white">
+    <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-6 bg-white dark:bg-gray-900">
       <div class="flex items-center justify-between mb-4">
         <h3 class="text-lg font-bold">Chart.js Integration</h3>
         <div class="flex gap-1">
@@ -307,7 +307,7 @@ function ChartDemo() {
               onclick={() => setChartType(t)}
               class={chartType === t
                 ? "px-3 py-1 text-xs rounded-full bg-blue-600 text-white"
-                : "px-3 py-1 text-xs rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200"}
+                : "px-3 py-1 text-xs rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"}
             >{t}</button>
           ))}
         </div>
@@ -328,10 +328,10 @@ function LiveClock() {
   }, []);
 
   return (
-    <div class="border border-gray-200 rounded-xl p-6 bg-white text-center">
+    <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-6 bg-white dark:bg-gray-900 text-center">
       <h3 class="text-lg font-bold mb-2">Live Clock</h3>
       <div class="text-4xl font-mono font-bold tabular-nums text-blue-600">{time}</div>
-      <p class="text-xs text-gray-400 mt-2">Updated every second via useEffect + setInterval</p>
+      <p class="text-xs text-gray-400 dark:text-gray-500 mt-2">Updated every second via useEffect + setInterval</p>
     </div>
   );
 }
@@ -350,9 +350,9 @@ function KeyTracker() {
   }, []);
 
   return (
-    <div class="border border-gray-200 rounded-xl p-6 bg-white">
+    <div class="border border-gray-200 dark:border-gray-700 rounded-xl p-6 bg-white dark:bg-gray-900">
       <h3 class="text-lg font-bold mb-4">Keyboard Tracker</h3>
-      <p class="text-sm text-gray-500 mb-3">Press any key:</p>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-3">Press any key:</p>
       <div class="flex flex-wrap gap-2 min-h-[48px]">
         {keys.map(k => (
           <span class="px-3 py-1 bg-gray-900 text-white rounded-lg text-sm font-mono">{k.key === " " ? "Space" : k.key}</span>
@@ -368,8 +368,8 @@ function KeyTracker() {
 export default function DemosPage() {
   return (
     <div>
-      <h1 class="text-4xl font-extrabold tracking-tight mb-2 text-gray-900">Interactive Demos</h1>
-      <p class="text-lg text-gray-500 mb-8 max-w-2xl">
+      <h1 class="text-4xl font-extrabold tracking-tight mb-2 text-gray-900 dark:text-white">Interactive Demos</h1>
+      <p class="text-lg text-gray-500 dark:text-gray-400 mb-8 max-w-2xl">
         Pushing the limits: state management, refs, effects, third-party libraries, drag & drop, keyboard events — all with zero build step.
       </p>
 
@@ -388,11 +388,11 @@ export default function DemosPage() {
 
       <div class="mt-6">
         <Tabs tabs={[
-          { label: "useState", content: (<p class="text-gray-600">All demos above use useState for reactive state. No build step, no JSX compiler — just tagged template literals.</p>) },
-          { label: "useEffect", content: (<p class="text-gray-600">The stopwatch, live clock, and keyboard tracker use useEffect with cleanup functions for intervals and event listeners.</p>) },
-          { label: "useRef", content: (<p class="text-gray-600">The stopwatch stores its interval ID in a ref. The Chart.js demo uses refs to access the canvas DOM element and the Chart instance.</p>) },
-          { label: "useMemo", content: (<p class="text-gray-600">The todo list uses useMemo to filter todos without recomputing on every render.</p>) },
-          { label: "Third-party", content: (<p class="text-gray-600">Chart.js loads dynamically via a script tag and integrates with our vdom through useRef + useEffect. Any vanilla JS library works the same way.</p>) },
+          { label: "useState", content: (<p class="text-gray-600 dark:text-gray-300">All demos above use useState for reactive state. No build step, no JSX compiler — just tagged template literals.</p>) },
+          { label: "useEffect", content: (<p class="text-gray-600 dark:text-gray-300">The stopwatch, live clock, and keyboard tracker use useEffect with cleanup functions for intervals and event listeners.</p>) },
+          { label: "useRef", content: (<p class="text-gray-600 dark:text-gray-300">The stopwatch stores its interval ID in a ref. The Chart.js demo uses refs to access the canvas DOM element and the Chart instance.</p>) },
+          { label: "useMemo", content: (<p class="text-gray-600 dark:text-gray-300">The todo list uses useMemo to filter todos without recomputing on every render.</p>) },
+          { label: "Third-party", content: (<p class="text-gray-600 dark:text-gray-300">Chart.js loads dynamically via a script tag and integrates with our vdom through useRef + useEffect. Any vanilla JS library works the same way.</p>) },
         ]} />
       </div>
     </div>

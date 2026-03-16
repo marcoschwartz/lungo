@@ -441,16 +441,13 @@
   }
 
   function render(vnode, container) {
-    // Clear container on first render
-    if (!container.__vnode) {
-      container.textContent = "";
-    }
     const oldVNode = container.__vnode || null;
     if (oldVNode) {
       patch(container, oldVNode, vnode);
     } else {
+      // First render: build new DOM then swap atomically (no flash)
       const dom = createDom(vnode, container);
-      container.appendChild(dom);
+      container.replaceChildren(dom);
     }
     container.__vnode = vnode;
   }
@@ -534,6 +531,13 @@
     // Text node
     if (newVNode.tag === TEXT_NODE) {
       const dom = getDom(oldVNode);
+      if (!dom) {
+        // Missing DOM (aborted hydration) — create fresh
+        const newDom = document.createTextNode(newVNode._text);
+        newVNode._dom = newDom;
+        if (parentDom) parentDom.appendChild(newDom);
+        return;
+      }
       if (oldVNode._text !== newVNode._text) {
         dom.textContent = newVNode._text;
       }
@@ -544,6 +548,15 @@
     // Component
     if (typeof newVNode.tag === "function") {
       const inst = oldVNode._instance;
+      if (!inst) {
+        // Missing instance (aborted hydration) — replace entire subtree
+        const dom = createDom(newVNode, parentDom);
+        const oldDom = existingDom || getDom(oldVNode);
+        if (oldDom && oldDom.parentNode) {
+          oldDom.parentNode.replaceChild(dom, oldDom);
+        }
+        return;
+      }
       const props = newVNode.children.length > 0
         ? Object.assign({}, newVNode.props, { children: newVNode.children })
         : newVNode.props;
@@ -568,6 +581,12 @@
 
     // Same element — diff props and children
     const dom = existingDom || getDom(oldVNode);
+    if (!dom) {
+      // Missing DOM — replace entirely
+      const newDom = createDom(newVNode, parentDom);
+      if (parentDom) parentDom.appendChild(newDom);
+      return;
+    }
     newVNode._dom = dom;
     setProps(dom, oldVNode.props, newVNode.props);
     diffChildren(dom, oldVNode.children, newVNode.children);
@@ -669,28 +688,39 @@
   // ─── Hydration ────────────────────────────────────────────────────
 
   function hydrate(vnode, container) {
-    hydrateNode(vnode, container.firstElementChild || container.firstChild, container);
-    container.__vnode = vnode;
+    try {
+      hydrateNode(vnode, container.firstElementChild || container.firstChild, container);
+      container.__vnode = vnode;
+    } catch (e) {
+      // Hydration mismatch — fall back to full client render (same as React/Next.js)
+      console.warn("[Lungo] Hydration mismatch, falling back to client render:", e.message);
+      render(vnode, container);
+    }
   }
 
   function hydrateNode(vnode, dom, parentDom) {
-    if (!dom || !vnode) return;
+    if (!vnode) return;
 
+    // Text node
     if (vnode.tag === TEXT_NODE) {
-      // Skip to a text node if current dom is an element
-      while (dom && dom.nodeType === 1 && dom.nextSibling) {
+      if (!dom) throw new Error("no DOM for text node");
+      // Find the text node (skip element nodes)
+      while (dom && dom.nodeType !== 3) {
         dom = dom.nextSibling;
       }
+      if (!dom) throw new Error("no text DOM found");
       vnode._dom = dom;
       return;
     }
 
-    // Skip whitespace text nodes to find matching element
+    // Skip whitespace-only text nodes to find matching element
     while (dom && dom.nodeType === 3 && !dom.textContent.trim()) {
       dom = dom.nextSibling;
     }
-    if (!dom) return;
 
+    if (!dom) throw new Error("no DOM for <" + vnode.tag + ">");
+
+    // Component
     if (typeof vnode.tag === "function") {
       const props = vnode.children.length > 0
         ? Object.assign({}, vnode.props, { children: vnode.children })
@@ -711,28 +741,68 @@
       return;
     }
 
-    // Only set props on element nodes
-    if (dom.nodeType === 1) {
-      vnode._dom = dom;
-      setProps(dom, EMPTY_OBJ, vnode.props);
-    } else {
-      // DOM mismatch — fall back to creating new DOM
-      vnode._dom = dom;
-      return;
+    // Element — validate tag match
+    if (dom.nodeType !== 1) {
+      throw new Error("expected element for <" + vnode.tag + ">, got nodeType " + dom.nodeType);
+    }
+    if (dom.tagName.toLowerCase() !== vnode.tag.toLowerCase()) {
+      throw new Error("tag mismatch: SSR <" + dom.tagName.toLowerCase() + "> vs client <" + vnode.tag + ">");
     }
 
+    vnode._dom = dom;
+    setProps(dom, EMPTY_OBJ, vnode.props);
+
+    // Set refs during hydration (setProps skips them)
+    if (vnode.props.ref && typeof vnode.props.ref === "object") {
+      vnode.props.ref.current = dom;
+    }
+
+    // Hydrate children — matches vnode children to DOM children.
+    // Handles: empty text vnodes (no DOM node), adjacent text merging,
+    // and whitespace-only text DOM nodes.
     let childDom = dom.firstChild;
-    for (const child of vnode.children) {
-      // Skip whitespace text nodes when looking for element children
-      if (child.tag !== TEXT_NODE) {
+    const children = vnode.children;
+    let i = 0;
+    while (i < children.length) {
+      const child = children[i];
+
+      if (child.tag === TEXT_NODE) {
+        // Collect consecutive text vnodes
+        let textGroup = [child];
+        while (i + 1 < children.length && children[i + 1].tag === TEXT_NODE) {
+          i++;
+          textGroup.push(children[i]);
+        }
+
+        // Check if the combined text is empty (SSR skips empty strings)
+        const combinedText = textGroup.map(t => t._text).join("");
+        if (!combinedText) {
+          // All empty text vnodes — no matching DOM node exists, skip
+          i++;
+          continue;
+        }
+
+        // Match to current DOM node if it's a text node
+        if (childDom && childDom.nodeType === 3) {
+          for (const tv of textGroup) {
+            tv._dom = childDom;
+          }
+          childDom = childDom.nextSibling;
+        }
+        // If current DOM node is not text, the text was merged or missing — skip
+      } else {
+        // Element vnode — skip whitespace-only text DOM nodes
         while (childDom && childDom.nodeType === 3 && !childDom.textContent.trim()) {
           childDom = childDom.nextSibling;
         }
-      }
-      if (childDom) {
+        if (!childDom) {
+          const cls = dom.className ? " class=\"" + dom.className.substring(0, 50) + "\"" : "";
+          throw new Error("more vnode children than DOM in <" + vnode.tag + cls + "> (child " + i + "/" + children.length + ", expect <" + child.tag + ">)");
+        }
         hydrateNode(child, childDom, dom);
         childDom = childDom.nextSibling;
       }
+      i++;
     }
   }
 

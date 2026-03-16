@@ -55,7 +55,7 @@ func (a *App) Build(opts BuildOptions) error {
 			loaderData = a.fetchLoaderData(route, fakeReq)
 		}
 
-		html := a.renderPage(route, loaderData)
+		html := a.renderPage(route, loaderData, nil)
 
 		// Determine output path
 		outPath := filepath.Join(absOut, pattern)

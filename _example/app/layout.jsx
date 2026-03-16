@@ -47,14 +47,16 @@ export default function Layout({ children }) {
   const [dark, setDark] = useState(() => getInitialTheme() === "dark");
   const router = useRouter();
 
-  // Apply theme to <html>
+  // Apply theme to <html> + set cookie for SSR
   useEffect(() => {
     if (dark) {
       document.documentElement.classList.add("dark");
       localStorage.setItem("theme", "dark");
+      document.cookie = "theme=dark;path=/;max-age=31536000";
     } else {
       document.documentElement.classList.remove("dark");
       localStorage.setItem("theme", "light");
+      document.cookie = "theme=light;path=/;max-age=31536000";
     }
   }, [dark]);
 

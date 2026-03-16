@@ -144,7 +144,13 @@ func (a *App) buildHandler() http.Handler {
 			if a.opts.Dev {
 				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			} else {
-				w.Header().Set("Cache-Control", "public, max-age=31536000")
+				etag := fmt.Sprintf(`"%x"`, len(runtimeJS))
+				w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
+				w.Header().Set("ETag", etag)
+				if r.Header.Get("If-None-Match") == etag {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
 			}
 			w.Write(runtimeJS)
 			return
@@ -220,7 +226,7 @@ func (a *App) serveStatic(w http.ResponseWriter, r *http.Request, name string) {
 			if a.opts.Dev {
 				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			} else {
-				w.Header().Set("Cache-Control", "public, max-age=31536000")
+				w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
 			}
 			w.Write(data)
 			return
@@ -233,7 +239,7 @@ func (a *App) serveStatic(w http.ResponseWriter, r *http.Request, name string) {
 			if a.opts.Dev {
 				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			} else {
-				w.Header().Set("Cache-Control", "public, max-age=31536000")
+				w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
 			}
 			w.Write(data)
 			return
@@ -283,7 +289,14 @@ func (a *App) serveAppFile(w http.ResponseWriter, r *http.Request, name string) 
 	if a.opts.Dev {
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	} else {
-		w.Header().Set("Cache-Control", "public, max-age=31536000")
+		// Short cache + ETag for revalidation — ensures fresh code after deployments
+		etag := fmt.Sprintf(`"%x"`, len(data))
+		w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 	}
 	w.Write(data)
 }

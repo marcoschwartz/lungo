@@ -1,6 +1,7 @@
 package lungo
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,14 @@ type compiler struct {
 func (c *compiler) peek() tok {
 	if c.pos < len(c.tokens) {
 		return c.tokens[c.pos]
+	}
+	return tok{t: tokEOF}
+}
+
+func (c *compiler) peekAt(offset int) tok {
+	idx := c.pos + offset
+	if idx < len(c.tokens) {
+		return c.tokens[idx]
 	}
 	return tok{t: tokEOF}
 }
@@ -111,10 +120,40 @@ func (c *compiler) compilePage() *compiledPage {
 			return page
 		}
 
-		// if statement — skip (use ternary in expressions instead)
+		// if statement
 		if t.t == tokIdent && t.v == "if" {
-			// Can't compile if statements easily — bail
-			return nil
+			c.advance() // skip "if"
+			c.expect(tokLParen)
+			cond := c.compileExpr()
+			c.expect(tokRParen)
+
+			// Compile if body
+			var ifBody *compiledPage
+			if c.peek().t == tokLBrace {
+				ifBody = c.compileBlock()
+			}
+
+			// Compile else body
+			var elseBody *compiledPage
+			if c.peek().t == tokIdent && c.peek().v == "else" {
+				c.advance()
+				if c.peek().t == tokIdent && c.peek().v == "if" {
+					// else if — wrap in a new compiledPage with one if stmt
+					// (recursive)
+					continue // let the loop pick up "if" next
+				}
+				if c.peek().t == tokLBrace {
+					elseBody = c.compileBlock()
+				}
+			}
+
+			page.Preamble = append(page.Preamble, compiledStmt{
+				IsIf:      true,
+				Condition: cond,
+				IfBody:    ifBody,
+				ElseBody:  elseBody,
+			})
+			continue
 		}
 
 		// Bare function calls (useEffect, etc.) — skip
@@ -130,6 +169,48 @@ func (c *compiler) compilePage() *compiledPage {
 		c.advance()
 	}
 	return nil
+}
+
+// compileBlock compiles a { ... } block into a compiledPage (handles const, return, if)
+func (c *compiler) compileBlock() *compiledPage {
+	c.expect(tokLBrace)
+	block := &compiledPage{}
+
+	for c.peek().t != tokRBrace && c.peek().t != tokEOF {
+		t := c.peek()
+
+		// return in block
+		if t.t == tokIdent && t.v == "return" {
+			c.advance()
+			block.ReturnExpr = c.compileExpr()
+			if c.peek().t == tokSemi {
+				c.advance()
+			}
+			// Skip rest of block
+			for c.peek().t != tokRBrace && c.peek().t != tokEOF {
+				c.advance()
+			}
+			break
+		}
+
+		// const/let/var
+		if t.t == tokIdent && (t.v == "const" || t.v == "let" || t.v == "var") {
+			c.advance()
+			name := c.advance().v
+			c.expect(tokAssign)
+			expr := c.compileExpr()
+			block.Preamble = append(block.Preamble, compiledStmt{Name: name, Expr: expr})
+			if c.peek().t == tokSemi {
+				c.advance()
+			}
+			continue
+		}
+
+		// Skip other tokens
+		c.advance()
+	}
+	c.expect(tokRBrace)
+	return block
 }
 
 // ─── Expression Compiler ────────────────────────────────────────
@@ -306,6 +387,55 @@ func (c *compiler) compileUnary() compiledExpr {
 			return jvNum(-val(scope).toNum())
 		}
 	}
+	if c.peek().t == tokIdent && c.peek().v == "typeof" {
+		c.advance()
+		val := c.compileUnary()
+		return func(scope map[string]*jsValue) *jsValue {
+			v := val(scope)
+			switch v.typ {
+			case jsTypeUndefined:
+				return jvStr("undefined")
+			case jsTypeNull:
+				return jvStr("object")
+			case jsTypeBool:
+				return jvStr("boolean")
+			case jsTypeNumber:
+				return jvStr("number")
+			case jsTypeString:
+				return jvStr("string")
+			case jsTypeFunc:
+				return jvStr("function")
+			default:
+				return jvStr("object")
+			}
+		}
+	}
+	if c.peek().t == tokIdent && c.peek().v == "new" {
+		c.advance()
+		ctor := c.advance().v
+		if c.peek().t == tokLParen {
+			c.advance()
+			var ctorArgs []compiledExpr
+			for c.peek().t != tokRParen && c.peek().t != tokEOF {
+				ctorArgs = append(ctorArgs, c.compileExpr())
+				if c.peek().t == tokComma {
+					c.advance()
+				}
+			}
+			c.expect(tokRParen)
+			_ = ctorArgs
+			if ctor == "Date" {
+				return func(scope map[string]*jsValue) *jsValue {
+					return jvObj(map[string]*jsValue{
+						"toLocaleTimeString": &jsValue{typ: jsTypeFunc, str: "__noop"},
+						"toLocaleDateString": &jsValue{typ: jsTypeFunc, str: "__noop"},
+						"getTime":            &jsValue{typ: jsTypeFunc, str: "__noop"},
+					})
+				}
+			}
+		}
+		return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+	}
 	return c.compilePostfix()
 }
 
@@ -386,7 +516,13 @@ func (c *compiler) compileFuncCall(fn compiledExpr) compiledExpr {
 				if len(args) > 0 {
 					initial = args[0](scope)
 				}
-				if initial.typ == jsTypeFunc {
+				if initial.typ == jsTypeFunc && initial.str == "__resolved" && initial.object != nil {
+					if v, ok := initial.object["__value"]; ok {
+						initial = v
+					}
+				} else if initial.typ == jsTypeFunc && initial.str == "__arrow" {
+					initial = callArrow(int(initial.num), nil, scope)
+				} else if initial.typ == jsTypeFunc {
 					initial = jvFalse
 				}
 				return jvArr([]*jsValue{initial, &jsValue{typ: jsTypeFunc, str: "__noop"}})
@@ -403,7 +539,20 @@ func (c *compiler) compileFuncCall(fn compiledExpr) compiledExpr {
 					initial = args[0](scope)
 				}
 				return jvObj(map[string]*jsValue{"current": initial})
-			case "__noop":
+			case "__hook_useMemo":
+				if len(args) > 0 {
+					val := args[0](scope)
+					if val.typ == jsTypeFunc && val.str == "__resolved" && val.object != nil {
+						if v, ok := val.object["__value"]; ok {
+							return v
+						}
+					}
+					if val.typ == jsTypeFunc && val.str == "__arrow" {
+						return callArrow(int(val.num), nil, scope)
+					}
+				}
+				return jvUndefined
+			case "__noop", "__resolved":
 				return jvUndefined
 			}
 		}
@@ -454,6 +603,37 @@ func (c *compiler) compileMethodCall(obj compiledExpr, method string) compiledEx
 		c.expect(tokRParen)
 		return func(scope map[string]*jsValue) *jsValue {
 			return jvBool(arg(scope).typ == jsTypeArray)
+		}
+	case "padStart":
+		targetLen := c.compileExpr()
+		var padStr compiledExpr
+		if c.peek().t == tokComma {
+			c.advance()
+			padStr = c.compileExpr()
+		}
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			s := obj(scope).toStr()
+			tl := int(targetLen(scope).toNum())
+			ps := " "
+			if padStr != nil {
+				ps = padStr(scope).toStr()
+			}
+			for len(s) < tl {
+				s = ps + s
+			}
+			return jvStr(s)
+		}
+	case "toFixed":
+		digits := c.compileExpr()
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			return jvStr(strconv.FormatFloat(obj(scope).toNum(), 'f', int(digits(scope).toNum()), 64))
+		}
+	case "toString":
+		c.expect(tokRParen)
+		return func(scope map[string]*jsValue) *jsValue {
+			return jvStr(obj(scope).toStr())
 		}
 	default:
 		// Unknown method — skip args
@@ -676,7 +856,14 @@ func (c *compiler) compileHCallAsNode() *compiledNode {
 			if len(childNodes) > 0 {
 				var childVals []*jsValue
 				for _, ch := range childNodes {
-					if ch.Expr != nil {
+					if ch.Node != nil {
+						childVals = append(childVals, jvNode(ch.Node.execute(scope)))
+					} else if ch.MapExpr != nil {
+						nodes := ch.MapExpr.execute(scope)
+						for _, n := range nodes {
+							childVals = append(childVals, jvNode(n))
+						}
+					} else if ch.Expr != nil {
 						childVals = append(childVals, ch.Expr(scope))
 					}
 				}
@@ -731,13 +918,13 @@ func (c *compiler) compileProps() (map[string]string, map[string]compiledExpr) {
 
 		c.expect(tokColon)
 
-		// Check if value is a static string
-		if c.peek().t == tokStr {
+		// Check if value is a simple static literal (no operators after it)
+		if c.peek().t == tokStr && c.peekAt(1).t != tokPlus {
 			static[key] = c.advance().v
-		} else if c.peek().t == tokNum {
+		} else if c.peek().t == tokNum && c.peekAt(1).t != tokPlus {
 			static[key] = c.advance().v
 		} else {
-			// Dynamic value
+			// Dynamic value (expression, concat, ternary, etc.)
 			dynamic[key] = c.compileExpr()
 		}
 
@@ -828,6 +1015,73 @@ func (c *compiler) compilePrimary() compiledExpr {
 					return func(scope map[string]*jsValue) *jsValue {
 						return jvBool(arg(scope).typ == jsTypeArray)
 					}
+				}
+			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+		case "Math":
+			c.advance()
+			if c.peek().t == tokDot {
+				c.advance()
+				method := c.advance().v
+				if c.peek().t == tokLParen {
+					c.advance()
+					arg := c.compileExpr()
+					// Check for second arg (min/max)
+					var arg2 compiledExpr
+					if c.peek().t == tokComma {
+						c.advance()
+						arg2 = c.compileExpr()
+					}
+					c.expect(tokRParen)
+					return func(scope map[string]*jsValue) *jsValue {
+						n := arg(scope).toNum()
+						switch method {
+						case "floor":
+							return jvNum(float64(int64(n)))
+						case "ceil":
+							if n == float64(int64(n)) {
+								return jvNum(n)
+							}
+							return jvNum(float64(int64(n) + 1))
+						case "round":
+							return jvNum(float64(int64(n + 0.5)))
+						case "abs":
+							if n < 0 {
+								return jvNum(-n)
+							}
+							return jvNum(n)
+						case "min":
+							if arg2 != nil {
+								b := arg2(scope).toNum()
+								if b < n {
+									return jvNum(b)
+								}
+							}
+							return jvNum(n)
+						case "max":
+							if arg2 != nil {
+								b := arg2(scope).toNum()
+								if b > n {
+									return jvNum(b)
+								}
+							}
+							return jvNum(n)
+						case "random":
+							return jvNum(0)
+						}
+						return jvNum(n)
+					}
+				}
+			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+		case "String":
+			c.advance()
+			if c.peek().t == tokLParen {
+				c.advance()
+				arg := c.compileExpr()
+				c.expect(tokRParen)
+				return func(scope map[string]*jsValue) *jsValue {
+					return jvStr(arg(scope).toStr())
 				}
 			}
 			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
