@@ -247,7 +247,12 @@ const (
 	tokNullCoalesce // ??
 	tokArrow        // =>
 	tokAssign
-	tokSpread // ...
+	tokSpread       // ...
+	tokTemplatePart // parts of template literals: `text${...}text`
+	tokPlusPlus     // ++
+	tokMinusMinus   // --
+	tokPlusAssign   // +=
+	tokMinusAssign  // -=
 )
 
 type tok struct {
@@ -321,20 +326,19 @@ func jsTokenize(src string) []tok {
 		// template literal (simple, no interpolation in transpiled output)
 		if ch == '`' {
 			i++
+			// Capture entire template literal content as single token
 			var sb strings.Builder
 			for i < len(src) && src[i] != '`' {
-				if src[i] == '\\' && i+1 < len(src) {
-					i++
-					sb.WriteByte(src[i])
-				} else {
-					sb.WriteByte(src[i])
-				}
+				if src[i] == '\\' && i+1 < len(src) { i++; sb.WriteByte(src[i]) } else { sb.WriteByte(src[i]) }
 				i++
 			}
-			if i < len(src) {
-				i++
+			if i < len(src) { i++ }
+			raw := sb.String()
+			if strings.Contains(raw, "${") {
+				tokens = append(tokens, tok{t: tokTemplatePart, v: raw})
+			} else {
+				tokens = append(tokens, tok{t: tokStr, v: raw})
 			}
-			tokens = append(tokens, tok{t: tokStr, v: sb.String()})
 			continue
 		}
 
@@ -439,9 +443,25 @@ func jsTokenize(src string) []tok {
 		case ';':
 			tokens = append(tokens, tok{t: tokSemi})
 		case '+':
-			tokens = append(tokens, tok{t: tokPlus})
+			if i+1 < len(src) && src[i+1] == '+' {
+				tokens = append(tokens, tok{t: tokPlusPlus})
+				i++
+			} else if i+1 < len(src) && src[i+1] == '=' {
+				tokens = append(tokens, tok{t: tokPlusAssign})
+				i++
+			} else {
+				tokens = append(tokens, tok{t: tokPlus})
+			}
 		case '-':
-			tokens = append(tokens, tok{t: tokMinus})
+			if i+1 < len(src) && src[i+1] == '-' {
+				tokens = append(tokens, tok{t: tokMinusMinus})
+				i++
+			} else if i+1 < len(src) && src[i+1] == '=' {
+				tokens = append(tokens, tok{t: tokMinusAssign})
+				i++
+			} else {
+				tokens = append(tokens, tok{t: tokMinus})
+			}
 		case '*':
 			tokens = append(tokens, tok{t: tokStar})
 		case '/':
@@ -759,6 +779,27 @@ func (e *jsEval) unary() *jsValue {
 		e.advance()
 		val := e.unary()
 		return jvBool(!val.truthy())
+	}
+	// Prefix ++/--
+	if e.peek().t == tokPlusPlus {
+		e.advance()
+		name := e.advance().v
+		if v, ok := e.scope[name]; ok {
+			newVal := jvNum(v.toNum() + 1)
+			e.scope[name] = newVal
+			return newVal
+		}
+		return jvNum(1)
+	}
+	if e.peek().t == tokMinusMinus {
+		e.advance()
+		name := e.advance().v
+		if v, ok := e.scope[name]; ok {
+			newVal := jvNum(v.toNum() - 1)
+			e.scope[name] = newVal
+			return newVal
+		}
+		return jvNum(-1)
 	}
 	if e.peek().t == tokMinus {
 		e.advance()
@@ -1863,6 +1904,35 @@ func (e *jsEval) primary() *jsValue {
 		e.advance()
 		return jvStr(t.v)
 
+	case tokTemplatePart:
+		// Template literal with ${} interpolation — raw content stored in token
+		raw := e.advance().v
+		var sb strings.Builder
+		i := 0
+		for i < len(raw) {
+			if i+1 < len(raw) && raw[i] == '$' && raw[i+1] == '{' {
+				i += 2
+				// Find matching }
+				depth := 1
+				start := i
+				for i < len(raw) && depth > 0 {
+					if raw[i] == '{' { depth++ } else if raw[i] == '}' { depth-- }
+					if depth > 0 { i++ }
+				}
+				exprStr := raw[start:i]
+				if i < len(raw) { i++ } // skip }
+				// Evaluate the expression
+				exprTokens := jsTokenize(exprStr)
+				exprEv := &jsEval{tokens: exprTokens, pos: 0, scope: e.scope}
+				val := exprEv.expr()
+				sb.WriteString(val.toStr())
+			} else {
+				sb.WriteByte(raw[i])
+				i++
+			}
+		}
+		return jvStr(sb.String())
+
 	case tokNum:
 		e.advance()
 		return jvNum(t.n)
@@ -1945,15 +2015,25 @@ func (e *jsEval) primary() *jsValue {
 			return e.evalHCall()
 		case "Array":
 			e.advance()
-			// Array.isArray(x)
 			if e.peek().t == tokDot {
 				e.advance()
 				method := e.advance()
-				if method.v == "isArray" && e.peek().t == tokLParen {
-					e.advance() // (
+				if e.peek().t == tokLParen {
+					e.advance()
 					arg := e.expr()
 					e.expect(tokRParen)
-					return jvBool(arg.typ == jsTypeArray)
+					switch method.v {
+					case "isArray":
+						return jvBool(arg.typ == jsTypeArray)
+					case "from":
+						if arg.typ == jsTypeArray { return arg }
+						if arg.typ == jsTypeString {
+							arr := make([]*jsValue, len(arg.str))
+							for i, ch := range arg.str { arr[i] = jvStr(string(ch)) }
+							return jvArr(arr)
+						}
+						return jvArr(nil)
+					}
 				}
 			}
 			return jvUndefined
@@ -2024,13 +2104,67 @@ func (e *jsEval) primary() *jsValue {
 			if e.peek().t == tokDot {
 				e.advance()
 				method := e.advance()
-				if method.v == "stringify" && e.peek().t == tokLParen {
+				if e.peek().t == tokLParen {
 					e.advance()
 					arg := e.expr()
 					e.expect(tokRParen)
-					b, _ := json.Marshal(jsValueToInterface(arg))
-					return jvStr(string(b))
+					switch method.v {
+					case "stringify":
+						b, _ := json.Marshal(jsValueToInterface(arg))
+						return jvStr(string(b))
+					case "parse":
+						return jsonToJSValue(json.RawMessage(arg.toStr()))
+					}
 				}
+			}
+			return jvUndefined
+		case "Number":
+			e.advance()
+			if e.peek().t == tokLParen {
+				e.advance()
+				arg := e.expr()
+				e.expect(tokRParen)
+				return jvNum(arg.toNum())
+			}
+			return jvUndefined
+		case "parseInt":
+			e.advance()
+			if e.peek().t == tokLParen {
+				e.advance()
+				arg := e.expr()
+				// Optional radix
+				if e.peek().t == tokComma { e.advance(); e.expr() }
+				e.expect(tokRParen)
+				n, err := strconv.ParseInt(strings.TrimSpace(arg.toStr()), 10, 64)
+				if err != nil { return jvNum(0) }
+				return jvNum(float64(n))
+			}
+			return jvUndefined
+		case "parseFloat":
+			e.advance()
+			if e.peek().t == tokLParen {
+				e.advance()
+				arg := e.expr()
+				e.expect(tokRParen)
+				n, err := strconv.ParseFloat(strings.TrimSpace(arg.toStr()), 64)
+				if err != nil { return jvNum(0) }
+				return jvNum(n)
+			}
+			return jvUndefined
+		case "Boolean":
+			e.advance()
+			if e.peek().t == tokLParen {
+				e.advance()
+				arg := e.expr()
+				e.expect(tokRParen)
+				return jvBool(arg.truthy())
+			}
+			return jvUndefined
+		case "console":
+			e.advance()
+			if e.peek().t == tokDot {
+				e.advance(); e.advance() // skip .method
+				if e.peek().t == tokLParen { e.skipBalanced(tokLParen, tokRParen) }
 			}
 			return jvUndefined
 		case "Math":
@@ -2400,16 +2534,244 @@ func (e *jsEval) evalStatements() *jsValue {
 			continue
 		}
 
-		// Bare expression statement (e.g., useEffect(...))
-		if t.t == tokIdent {
-			if val, ok := e.scope[t.v]; ok && val.typ == jsTypeFunc {
-				// Evaluate the expression (will call the function)
-				e.expr()
-				if e.peek().t == tokSemi {
-					e.advance()
+		// for statement
+		if t.t == tokIdent && t.v == "for" {
+			e.advance() // skip "for"
+			e.expect(tokLParen)
+			// Check for for...of: for (const x of arr)
+			if e.peek().t == tokIdent && (e.peek().v == "const" || e.peek().v == "let" || e.peek().v == "var") {
+				e.advance() // skip const/let/var
+				varName := e.advance().v // variable name
+				if e.peek().t == tokIdent && e.peek().v == "of" {
+					e.advance() // skip "of"
+					arr := e.expr()
+					e.expect(tokRParen)
+					// Capture body, then execute for each item
+					if e.peek().t == tokLBrace {
+						bodyStart := e.pos
+						e.skipBalanced(tokLBrace, tokRBrace)
+						bodyEnd := e.pos
+						if arr.typ == jsTypeArray {
+							for _, item := range arr.array {
+								e.scope[varName] = item
+								bodyTokens := make([]tok, bodyEnd-bodyStart)
+								copy(bodyTokens, e.tokens[bodyStart:bodyEnd])
+								if len(bodyTokens) >= 2 && bodyTokens[0].t == tokLBrace {
+									bodyTokens = bodyTokens[1 : len(bodyTokens)-1]
+								}
+								bodyTokens = append(bodyTokens, tok{t: tokEOF})
+								bodyEv := &jsEval{tokens: bodyTokens, pos: 0, scope: e.scope}
+								result := bodyEv.evalStatements()
+								if result != nil { return result }
+							}
+						}
+					}
+					continue
 				}
+				// Regular for (let i = 0; ...; ...)
+				// Init: already consumed const/let/var and name
+				e.expect(tokAssign)
+				initVal := e.expr()
+				e.scope[varName] = initVal
+			} else {
+				// for (; ...; ...) or for (expr; ...; ...)
+				if e.peek().t != tokSemi {
+					e.expr()
+				}
+			}
+			e.expect(tokSemi)
+			// Capture condition tokens
+			condStart := e.pos
+			if e.peek().t != tokSemi {
+				e.expr() // evaluate once to skip
+			}
+			condEnd := e.pos
+			e.expect(tokSemi)
+			// Capture update tokens
+			updateStart := e.pos
+			if e.peek().t != tokRParen {
+				e.expr() // skip
+			}
+			updateEnd := e.pos
+			e.expect(tokRParen)
+			// Capture body
+			if e.peek().t == tokLBrace {
+				bodyStart := e.pos
+				e.skipBalanced(tokLBrace, tokRBrace)
+				bodyEnd := e.pos
+				// Execute loop (max 10000 iterations for safety)
+				for iter := 0; iter < 10000; iter++ {
+					// Evaluate condition
+					condTokens := make([]tok, condEnd-condStart)
+					copy(condTokens, e.tokens[condStart:condEnd])
+					condTokens = append(condTokens, tok{t: tokEOF})
+					condEv := &jsEval{tokens: condTokens, pos: 0, scope: e.scope}
+					if !condEv.expr().truthy() {
+						break
+					}
+					// Execute body
+					bodyTokens := make([]tok, bodyEnd-bodyStart)
+					copy(bodyTokens, e.tokens[bodyStart:bodyEnd])
+					// Strip outer braces
+					if len(bodyTokens) >= 2 && bodyTokens[0].t == tokLBrace {
+						bodyTokens = bodyTokens[1 : len(bodyTokens)-1]
+					}
+					bodyTokens = append(bodyTokens, tok{t: tokEOF})
+					bodyEv := &jsEval{tokens: bodyTokens, pos: 0, scope: e.scope}
+					result := bodyEv.evalStatements()
+					if result != nil {
+						return result
+					}
+					// Execute update
+					updateTokens := make([]tok, updateEnd-updateStart)
+					copy(updateTokens, e.tokens[updateStart:updateEnd])
+					updateTokens = append(updateTokens, tok{t: tokEOF})
+					updateEv := &jsEval{tokens: updateTokens, pos: 0, scope: e.scope}
+					updateEv.expr()
+				}
+			}
+			continue
+		}
+
+		// while statement
+		if t.t == tokIdent && t.v == "while" {
+			e.advance() // skip "while"
+			e.expect(tokLParen)
+			condStart := e.pos
+			e.expr()
+			condEnd := e.pos
+			e.expect(tokRParen)
+			if e.peek().t == tokLBrace {
+				bodyStart := e.pos
+				e.skipBalanced(tokLBrace, tokRBrace)
+				bodyEnd := e.pos
+				for iter := 0; iter < 10000; iter++ {
+					condTokens := make([]tok, condEnd-condStart)
+					copy(condTokens, e.tokens[condStart:condEnd])
+					condTokens = append(condTokens, tok{t: tokEOF})
+					condEv := &jsEval{tokens: condTokens, pos: 0, scope: e.scope}
+					if !condEv.expr().truthy() {
+						break
+					}
+					bodyTokens := make([]tok, bodyEnd-bodyStart)
+					copy(bodyTokens, e.tokens[bodyStart:bodyEnd])
+					if len(bodyTokens) >= 2 && bodyTokens[0].t == tokLBrace {
+						bodyTokens = bodyTokens[1 : len(bodyTokens)-1]
+					}
+					bodyTokens = append(bodyTokens, tok{t: tokEOF})
+					bodyEv := &jsEval{tokens: bodyTokens, pos: 0, scope: e.scope}
+					result := bodyEv.evalStatements()
+					if result != nil {
+						return result
+					}
+				}
+			}
+			continue
+		}
+
+		// try/catch — execute try block, ignore errors
+		if t.t == tokIdent && t.v == "try" {
+			e.advance() // skip "try"
+			if e.peek().t == tokLBrace {
+				e.advance() // skip {
+				result := e.evalBlock()
+				if result != nil {
+					// Skip catch/finally
+					if e.peek().t == tokIdent && e.peek().v == "catch" {
+						e.advance()
+						if e.peek().t == tokLParen { e.skipBalanced(tokLParen, tokRParen) }
+						if e.peek().t == tokLBrace { e.skipBalanced(tokLBrace, tokRBrace) }
+					}
+					if e.peek().t == tokIdent && e.peek().v == "finally" {
+						e.advance()
+						if e.peek().t == tokLBrace { e.advance(); e.evalBlock() }
+					}
+					return result
+				}
+			}
+			// Skip catch
+			if e.peek().t == tokIdent && e.peek().v == "catch" {
+				e.advance()
+				if e.peek().t == tokLParen { e.skipBalanced(tokLParen, tokRParen) }
+				if e.peek().t == tokLBrace { e.skipBalanced(tokLBrace, tokRBrace) }
+			}
+			// Execute finally if present
+			if e.peek().t == tokIdent && e.peek().v == "finally" {
+				e.advance()
+				if e.peek().t == tokLBrace { e.advance(); e.evalBlock() }
+			}
+			continue
+		}
+
+		// console.log/warn/error — no-op in SSR
+		if t.t == tokIdent && t.v == "console" {
+			e.advance()
+			if e.peek().t == tokDot {
+				e.advance() // skip .
+				e.advance() // skip method name
+				if e.peek().t == tokLParen {
+					// Skip all arguments
+					e.skipBalanced(tokLParen, tokRParen)
+				}
+			}
+			if e.peek().t == tokSemi { e.advance() }
+			continue
+		}
+
+		// Identifier — could be assignment, postfix ++/--, or function call
+		if t.t == tokIdent {
+			name := t.v
+			// Check for postfix ++/--
+			if e.pos+1 < len(e.tokens) && e.tokens[e.pos+1].t == tokPlusPlus {
+				e.advance(); e.advance() // skip name, ++
+				if v, ok := e.scope[name]; ok {
+					e.scope[name] = jvNum(v.toNum() + 1)
+				}
+				if e.peek().t == tokSemi { e.advance() }
 				continue
 			}
+			if e.pos+1 < len(e.tokens) && e.tokens[e.pos+1].t == tokMinusMinus {
+				e.advance(); e.advance()
+				if v, ok := e.scope[name]; ok {
+					e.scope[name] = jvNum(v.toNum() - 1)
+				}
+				if e.peek().t == tokSemi { e.advance() }
+				continue
+			}
+			// Check for += / -=
+			if e.pos+1 < len(e.tokens) && e.tokens[e.pos+1].t == tokPlusAssign {
+				e.advance(); e.advance()
+				val := e.expr()
+				if v, ok := e.scope[name]; ok {
+					if v.typ == jsTypeString || val.typ == jsTypeString {
+						e.scope[name] = jvStr(v.toStr() + val.toStr())
+					} else {
+						e.scope[name] = jvNum(v.toNum() + val.toNum())
+					}
+				}
+				if e.peek().t == tokSemi { e.advance() }
+				continue
+			}
+			if e.pos+1 < len(e.tokens) && e.tokens[e.pos+1].t == tokMinusAssign {
+				e.advance(); e.advance()
+				val := e.expr()
+				if v, ok := e.scope[name]; ok {
+					e.scope[name] = jvNum(v.toNum() - val.toNum())
+				}
+				if e.peek().t == tokSemi { e.advance() }
+				continue
+			}
+			// Check for simple reassignment: name = expr
+			if e.pos+1 < len(e.tokens) && e.tokens[e.pos+1].t == tokAssign {
+				e.advance(); e.advance()
+				e.scope[name] = e.expr()
+				if e.peek().t == tokSemi { e.advance() }
+				continue
+			}
+			// Function call or other expression
+			e.expr()
+			if e.peek().t == tokSemi { e.advance() }
+			continue
 		}
 
 		// skip other tokens

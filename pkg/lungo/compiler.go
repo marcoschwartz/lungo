@@ -1,6 +1,7 @@
 package lungo
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 )
@@ -156,13 +157,170 @@ func (c *compiler) compilePage() *compiledPage {
 			continue
 		}
 
-		// Bare function calls (useEffect, etc.) — skip
-		if t.t == tokIdent {
-			// Try to skip the expression
-			c.compileExpr()
-			if c.peek().t == tokSemi {
-				c.advance()
+		// for loop
+		if t.t == tokIdent && t.v == "for" {
+			c.advance() // skip "for"
+			c.expect(tokLParen)
+
+			// Check for for...of
+			if c.peek().t == tokIdent && (c.peek().v == "const" || c.peek().v == "let" || c.peek().v == "var") {
+				c.advance() // skip const/let/var
+				varName := c.advance().v
+				if c.peek().t == tokIdent && c.peek().v == "of" {
+					c.advance() // skip "of"
+					iterExpr := c.compileExpr()
+					c.expect(tokRParen)
+					var body *compiledPage
+					if c.peek().t == tokLBrace { body = c.compileBlock() }
+					page.Preamble = append(page.Preamble, compiledStmt{
+						IsForOf: true, IterVar: varName, IterExpr: iterExpr, LoopBody: body,
+					})
+					continue
+				}
+				// Regular for: already consumed const/let and name
+				c.expect(tokAssign)
+				initExpr := c.compileExpr()
+				initStmt := &compiledStmt{Name: varName, Expr: initExpr}
+				c.expect(tokSemi)
+				condExpr := c.compileExpr()
+				c.expect(tokSemi)
+				// Update expression — handle i++ specially
+				var updateExpr compiledExpr
+				updateName := c.peek().v
+				if c.peek().t == tokIdent {
+					c.advance()
+					if c.peek().t == tokPlusPlus {
+						c.advance()
+						n := updateName
+						updateExpr = func(scope map[string]*jsValue) *jsValue {
+							if v, ok := scope[n]; ok { scope[n] = jvNum(v.toNum() + 1) }
+							return jvUndefined
+						}
+					} else if c.peek().t == tokMinusMinus {
+						c.advance()
+						n := updateName
+						updateExpr = func(scope map[string]*jsValue) *jsValue {
+							if v, ok := scope[n]; ok { scope[n] = jvNum(v.toNum() - 1) }
+							return jvUndefined
+						}
+					} else if c.peek().t == tokPlusAssign {
+						c.advance()
+						val := c.compileExpr()
+						n := updateName
+						updateExpr = func(scope map[string]*jsValue) *jsValue {
+							if v, ok := scope[n]; ok { scope[n] = jvNum(v.toNum() + val(scope).toNum()) }
+							return jvUndefined
+						}
+					} else {
+						// Unknown update — skip
+						updateExpr = func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+					}
+				}
+				c.expect(tokRParen)
+				var body *compiledPage
+				if c.peek().t == tokLBrace { body = c.compileBlock() }
+				page.Preamble = append(page.Preamble, compiledStmt{
+					IsForLoop: true, InitStmt: initStmt, LoopCond: condExpr, LoopUpdate: updateExpr, LoopBody: body,
+				})
+			} else {
+				// for (expr; ...; ...) — skip init
+				if c.peek().t != tokSemi { c.compileExpr() }
+				c.expect(tokSemi)
+				_ = c.compileExpr() // condition (unused in simple skip)
+				c.expect(tokSemi)
+				if c.peek().t != tokRParen { c.compileExpr() }
+				c.expect(tokRParen)
+				if c.peek().t == tokLBrace { c.compileBlock() }
 			}
+			continue
+		}
+
+		// while loop
+		if t.t == tokIdent && t.v == "while" {
+			c.advance()
+			c.expect(tokLParen)
+			cond := c.compileExpr()
+			c.expect(tokRParen)
+			var body *compiledPage
+			if c.peek().t == tokLBrace { body = c.compileBlock() }
+			page.Preamble = append(page.Preamble, compiledStmt{
+				IsWhile: true, LoopCond: cond, LoopBody: body,
+			})
+			continue
+		}
+
+		// try/catch
+		if t.t == tokIdent && t.v == "try" {
+			c.advance()
+			var tryBody *compiledPage
+			if c.peek().t == tokLBrace { tryBody = c.compileBlock() }
+			if c.peek().t == tokIdent && c.peek().v == "catch" {
+				c.advance()
+				if c.peek().t == tokLParen { c.skipBalancedCompiler(tokLParen, tokRParen) }
+				if c.peek().t == tokLBrace { c.skipBalancedCompiler(tokLBrace, tokRBrace) }
+			}
+			if c.peek().t == tokIdent && c.peek().v == "finally" {
+				c.advance()
+				if c.peek().t == tokLBrace { c.skipBalancedCompiler(tokLBrace, tokRBrace) }
+			}
+			page.Preamble = append(page.Preamble, compiledStmt{IsTryCatch: true, TryBody: tryBody})
+			continue
+		}
+
+		// console.log/warn/error — no-op
+		if t.t == tokIdent && t.v == "console" {
+			c.advance()
+			if c.peek().t == tokDot { c.advance(); c.advance() }
+			if c.peek().t == tokLParen { c.skipBalancedCompiler(tokLParen, tokRParen) }
+			if c.peek().t == tokSemi { c.advance() }
+			page.Preamble = append(page.Preamble, compiledStmt{IsNoop: true})
+			continue
+		}
+
+		// Identifier — check for reassignment, ++, +=
+		if t.t == tokIdent {
+			name := t.v
+			// name++
+			if c.peekAt(1).t == tokPlusPlus {
+				c.advance(); c.advance()
+				if c.peek().t == tokSemi { c.advance() }
+				page.Preamble = append(page.Preamble, compiledStmt{IsIncrement: true, Name: name, IncrDelta: 1})
+				continue
+			}
+			// name--
+			if c.peekAt(1).t == tokMinusMinus {
+				c.advance(); c.advance()
+				if c.peek().t == tokSemi { c.advance() }
+				page.Preamble = append(page.Preamble, compiledStmt{IsIncrement: true, Name: name, IncrDelta: -1})
+				continue
+			}
+			// name += expr
+			if c.peekAt(1).t == tokPlusAssign {
+				c.advance(); c.advance()
+				expr := c.compileExpr()
+				if c.peek().t == tokSemi { c.advance() }
+				page.Preamble = append(page.Preamble, compiledStmt{IsCompound: true, Name: name, CompoundOp: "+=", Expr: expr})
+				continue
+			}
+			// name -= expr
+			if c.peekAt(1).t == tokMinusAssign {
+				c.advance(); c.advance()
+				expr := c.compileExpr()
+				if c.peek().t == tokSemi { c.advance() }
+				page.Preamble = append(page.Preamble, compiledStmt{IsCompound: true, Name: name, CompoundOp: "-=", Expr: expr})
+				continue
+			}
+			// name = expr (reassignment, not declaration)
+			if c.peekAt(1).t == tokAssign {
+				c.advance(); c.advance()
+				expr := c.compileExpr()
+				if c.peek().t == tokSemi { c.advance() }
+				page.Preamble = append(page.Preamble, compiledStmt{IsReassign: true, Name: name, Expr: expr})
+				continue
+			}
+			// Bare function call or expression
+			c.compileExpr()
+			if c.peek().t == tokSemi { c.advance() }
 			continue
 		}
 
@@ -171,7 +329,7 @@ func (c *compiler) compilePage() *compiledPage {
 	return nil
 }
 
-// compileBlock compiles a { ... } block into a compiledPage (handles const, return, if)
+// compileBlock compiles a { ... } block into a compiledPage.
 func (c *compiler) compileBlock() *compiledPage {
 	c.expect(tokLBrace)
 	block := &compiledPage{}
@@ -179,17 +337,12 @@ func (c *compiler) compileBlock() *compiledPage {
 	for c.peek().t != tokRBrace && c.peek().t != tokEOF {
 		t := c.peek()
 
-		// return in block
+		// return
 		if t.t == tokIdent && t.v == "return" {
 			c.advance()
 			block.ReturnExpr = c.compileExpr()
-			if c.peek().t == tokSemi {
-				c.advance()
-			}
-			// Skip rest of block
-			for c.peek().t != tokRBrace && c.peek().t != tokEOF {
-				c.advance()
-			}
+			if c.peek().t == tokSemi { c.advance() }
+			for c.peek().t != tokRBrace && c.peek().t != tokEOF { c.advance() }
 			break
 		}
 
@@ -200,13 +353,68 @@ func (c *compiler) compileBlock() *compiledPage {
 			c.expect(tokAssign)
 			expr := c.compileExpr()
 			block.Preamble = append(block.Preamble, compiledStmt{Name: name, Expr: expr})
-			if c.peek().t == tokSemi {
-				c.advance()
-			}
+			if c.peek().t == tokSemi { c.advance() }
 			continue
 		}
 
-		// Skip other tokens
+		// if
+		if t.t == tokIdent && t.v == "if" {
+			c.advance()
+			c.expect(tokLParen)
+			cond := c.compileExpr()
+			c.expect(tokRParen)
+			var ifBody *compiledPage
+			if c.peek().t == tokLBrace { ifBody = c.compileBlock() }
+			var elseBody *compiledPage
+			if c.peek().t == tokIdent && c.peek().v == "else" {
+				c.advance()
+				if c.peek().t == tokLBrace { elseBody = c.compileBlock() }
+			}
+			block.Preamble = append(block.Preamble, compiledStmt{IsIf: true, Condition: cond, IfBody: ifBody, ElseBody: elseBody})
+			continue
+		}
+
+		// Identifier: ++, --, +=, -=, reassignment, or expression
+		if t.t == tokIdent {
+			name := t.v
+			if c.peekAt(1).t == tokPlusPlus {
+				c.advance(); c.advance()
+				if c.peek().t == tokSemi { c.advance() }
+				block.Preamble = append(block.Preamble, compiledStmt{IsIncrement: true, Name: name, IncrDelta: 1})
+				continue
+			}
+			if c.peekAt(1).t == tokMinusMinus {
+				c.advance(); c.advance()
+				if c.peek().t == tokSemi { c.advance() }
+				block.Preamble = append(block.Preamble, compiledStmt{IsIncrement: true, Name: name, IncrDelta: -1})
+				continue
+			}
+			if c.peekAt(1).t == tokPlusAssign {
+				c.advance(); c.advance()
+				expr := c.compileExpr()
+				if c.peek().t == tokSemi { c.advance() }
+				block.Preamble = append(block.Preamble, compiledStmt{IsCompound: true, Name: name, CompoundOp: "+=", Expr: expr})
+				continue
+			}
+			if c.peekAt(1).t == tokMinusAssign {
+				c.advance(); c.advance()
+				expr := c.compileExpr()
+				if c.peek().t == tokSemi { c.advance() }
+				block.Preamble = append(block.Preamble, compiledStmt{IsCompound: true, Name: name, CompoundOp: "-=", Expr: expr})
+				continue
+			}
+			if c.peekAt(1).t == tokAssign {
+				c.advance(); c.advance()
+				expr := c.compileExpr()
+				if c.peek().t == tokSemi { c.advance() }
+				block.Preamble = append(block.Preamble, compiledStmt{IsReassign: true, Name: name, Expr: expr})
+				continue
+			}
+			c.compileExpr()
+			if c.peek().t == tokSemi { c.advance() }
+			continue
+		}
+
 		c.advance()
 	}
 	c.expect(tokRBrace)
@@ -1346,6 +1554,34 @@ func (c *compiler) compilePrimary() compiledExpr {
 		s := t.v
 		return func(scope map[string]*jsValue) *jsValue { return jvStr(s) }
 
+	case tokTemplatePart:
+		// Template literal with ${} — evaluate at runtime using scope
+		raw := c.advance().v
+		return func(scope map[string]*jsValue) *jsValue {
+			var sb strings.Builder
+			i := 0
+			for i < len(raw) {
+				if i+1 < len(raw) && raw[i] == '$' && raw[i+1] == '{' {
+					i += 2
+					depth := 1
+					start := i
+					for i < len(raw) && depth > 0 {
+						if raw[i] == '{' { depth++ } else if raw[i] == '}' { depth-- }
+						if depth > 0 { i++ }
+					}
+					exprStr := raw[start:i]
+					if i < len(raw) { i++ }
+					exprTokens := jsTokenize(exprStr)
+					exprEv := &jsEval{tokens: exprTokens, pos: 0, scope: scope}
+					sb.WriteString(exprEv.expr().toStr())
+				} else {
+					sb.WriteByte(raw[i])
+					i++
+				}
+			}
+			return jvStr(sb.String())
+		}
+
 	case tokNum:
 		c.advance()
 		n := t.n
@@ -1453,13 +1689,48 @@ func (c *compiler) compilePrimary() compiledExpr {
 			c.advance()
 			if c.peek().t == tokDot {
 				c.advance()
-				method := c.advance()
-				if method.v == "isArray" && c.peek().t == tokLParen {
+				method := c.advance().v
+				if c.peek().t == tokLParen {
 					c.advance()
 					arg := c.compileExpr()
 					c.expect(tokRParen)
-					return func(scope map[string]*jsValue) *jsValue {
-						return jvBool(arg(scope).typ == jsTypeArray)
+					switch method {
+					case "isArray":
+						return func(scope map[string]*jsValue) *jsValue { return jvBool(arg(scope).typ == jsTypeArray) }
+					case "from":
+						return func(scope map[string]*jsValue) *jsValue {
+							v := arg(scope)
+							if v.typ == jsTypeArray { return v }
+							if v.typ == jsTypeString {
+								arr := make([]*jsValue, len(v.str))
+								for i, ch := range v.str { arr[i] = jvStr(string(ch)) }
+								return jvArr(arr)
+							}
+							return jvArr(nil)
+						}
+					}
+				}
+			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+		case "JSON":
+			c.advance()
+			if c.peek().t == tokDot {
+				c.advance()
+				method := c.advance().v
+				if c.peek().t == tokLParen {
+					c.advance()
+					arg := c.compileExpr()
+					c.expect(tokRParen)
+					switch method {
+					case "stringify":
+						return func(scope map[string]*jsValue) *jsValue {
+							b, _ := json.Marshal(jsValueToInterface(arg(scope)))
+							return jvStr(string(b))
+						}
+					case "parse":
+						return func(scope map[string]*jsValue) *jsValue {
+							return jsonToJSValue(json.RawMessage(arg(scope).toStr()))
+						}
 					}
 				}
 			}
@@ -1526,10 +1797,51 @@ func (c *compiler) compilePrimary() compiledExpr {
 				c.advance()
 				arg := c.compileExpr()
 				c.expect(tokRParen)
+				return func(scope map[string]*jsValue) *jsValue { return jvStr(arg(scope).toStr()) }
+			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+		case "Number":
+			c.advance()
+			if c.peek().t == tokLParen {
+				c.advance(); arg := c.compileExpr(); c.expect(tokRParen)
+				return func(scope map[string]*jsValue) *jsValue { return jvNum(arg(scope).toNum()) }
+			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+		case "Boolean":
+			c.advance()
+			if c.peek().t == tokLParen {
+				c.advance(); arg := c.compileExpr(); c.expect(tokRParen)
+				return func(scope map[string]*jsValue) *jsValue { return jvBool(arg(scope).truthy()) }
+			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+		case "parseInt":
+			c.advance()
+			if c.peek().t == tokLParen {
+				c.advance(); arg := c.compileExpr()
+				if c.peek().t == tokComma { c.advance(); c.compileExpr() } // skip radix
+				c.expect(tokRParen)
 				return func(scope map[string]*jsValue) *jsValue {
-					return jvStr(arg(scope).toStr())
+					n, err := strconv.ParseInt(strings.TrimSpace(arg(scope).toStr()), 10, 64)
+					if err != nil { return jvNum(0) }
+					return jvNum(float64(n))
 				}
 			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+		case "parseFloat":
+			c.advance()
+			if c.peek().t == tokLParen {
+				c.advance(); arg := c.compileExpr(); c.expect(tokRParen)
+				return func(scope map[string]*jsValue) *jsValue {
+					n, err := strconv.ParseFloat(strings.TrimSpace(arg(scope).toStr()), 64)
+					if err != nil { return jvNum(0) }
+					return jvNum(n)
+				}
+			}
+			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
+		case "console":
+			c.advance()
+			if c.peek().t == tokDot { c.advance(); c.advance() }
+			if c.peek().t == tokLParen { c.skipBalancedCompiler(tokLParen, tokRParen) }
 			return func(scope map[string]*jsValue) *jsValue { return jvUndefined }
 		default:
 			c.advance()
@@ -1638,6 +1950,15 @@ func (c *compiler) compileArray() compiledExpr {
 			arr[i] = item(scope)
 		}
 		return jvArr(arr)
+	}
+}
+
+func (c *compiler) skipBalancedCompiler(open, close tokType) {
+	depth := 1
+	c.advance()
+	for depth > 0 && c.pos < len(c.tokens) {
+		t := c.advance()
+		if t.t == open { depth++ } else if t.t == close { depth-- }
 	}
 }
 

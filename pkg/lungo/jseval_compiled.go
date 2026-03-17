@@ -30,8 +30,33 @@ type compiledStmt struct {
 	// If statement
 	IsIf      bool
 	Condition compiledExpr
-	IfBody    *compiledPage   // statements inside if block (may contain return)
-	ElseBody  *compiledPage   // statements inside else block (may contain return)
+	IfBody    *compiledPage
+	ElseBody  *compiledPage
+	// For loop: for (init; cond; update) { body }
+	IsForLoop  bool
+	InitStmt   *compiledStmt   // init (const i = 0)
+	LoopCond   compiledExpr    // condition
+	LoopUpdate compiledExpr    // update expression (i++)
+	LoopBody   *compiledPage   // body statements
+	// For...of: for (const x of arr) { body }
+	IsForOf    bool
+	IterVar    string
+	IterExpr   compiledExpr
+	// While loop
+	IsWhile    bool
+	// Try/catch
+	IsTryCatch bool
+	TryBody    *compiledPage
+	// Reassignment: name = expr (without const/let)
+	IsReassign bool
+	// Compound assignment: name += expr, name -= expr
+	IsCompound bool
+	CompoundOp string // "+=" or "-="
+	// Increment/decrement: name++ or name--
+	IsIncrement bool
+	IncrDelta   float64 // +1 or -1
+	// No-op (console.log etc.)
+	IsNoop bool
 }
 
 // compiledNode is a pre-analyzed SSR vnode.
@@ -74,21 +99,86 @@ func (cp *compiledPage) execute(scope map[string]*jsValue) *jsValue {
 
 func (cp *compiledPage) executeStatements(scope map[string]*jsValue) *jsValue {
 	for _, stmt := range cp.Preamble {
-		if stmt.IsIf {
-			// If statement — may contain return
+		if stmt.IsNoop {
+			continue
+		} else if stmt.IsIf {
 			if stmt.Condition(scope).truthy() {
 				if stmt.IfBody != nil {
-					result := stmt.IfBody.executeStatements(scope)
-					if result != nil {
-						return result // early return from if block
+					if result := stmt.IfBody.executeStatements(scope); result != nil {
+						return result
 					}
 				}
 			} else if stmt.ElseBody != nil {
-				result := stmt.ElseBody.executeStatements(scope)
-				if result != nil {
+				if result := stmt.ElseBody.executeStatements(scope); result != nil {
 					return result
 				}
 			}
+		} else if stmt.IsForLoop {
+			// Execute init
+			if stmt.InitStmt != nil && stmt.InitStmt.Expr != nil {
+				scope[stmt.InitStmt.Name] = stmt.InitStmt.Expr(scope)
+			}
+			for iter := 0; iter < 10000; iter++ {
+				if stmt.LoopCond != nil && !stmt.LoopCond(scope).truthy() {
+					break
+				}
+				if stmt.LoopBody != nil {
+					if result := stmt.LoopBody.executeStatements(scope); result != nil {
+						return result
+					}
+				}
+				if stmt.LoopUpdate != nil {
+					stmt.LoopUpdate(scope)
+				}
+			}
+		} else if stmt.IsForOf {
+			arr := stmt.IterExpr(scope)
+			if arr.typ == jsTypeArray {
+				for _, item := range arr.array {
+					scope[stmt.IterVar] = item
+					if stmt.LoopBody != nil {
+						if result := stmt.LoopBody.executeStatements(scope); result != nil {
+							return result
+						}
+					}
+				}
+			}
+		} else if stmt.IsWhile {
+			for iter := 0; iter < 10000; iter++ {
+				if stmt.LoopCond != nil && !stmt.LoopCond(scope).truthy() {
+					break
+				}
+				if stmt.LoopBody != nil {
+					if result := stmt.LoopBody.executeStatements(scope); result != nil {
+						return result
+					}
+				}
+			}
+		} else if stmt.IsTryCatch {
+			if stmt.TryBody != nil {
+				if result := stmt.TryBody.executeStatements(scope); result != nil {
+					return result
+				}
+			}
+		} else if stmt.IsIncrement {
+			if v, ok := scope[stmt.Name]; ok {
+				scope[stmt.Name] = jvNum(v.toNum() + stmt.IncrDelta)
+			}
+		} else if stmt.IsCompound {
+			if v, ok := scope[stmt.Name]; ok {
+				val := stmt.Expr(scope)
+				if stmt.CompoundOp == "+=" {
+					if v.typ == jsTypeString || val.typ == jsTypeString {
+						scope[stmt.Name] = jvStr(v.toStr() + val.toStr())
+					} else {
+						scope[stmt.Name] = jvNum(v.toNum() + val.toNum())
+					}
+				} else {
+					scope[stmt.Name] = jvNum(v.toNum() - val.toNum())
+				}
+			}
+		} else if stmt.IsReassign {
+			scope[stmt.Name] = stmt.Expr(scope)
 		} else if stmt.IsArrayDestructure {
 			val := stmt.Expr(scope)
 			if val.typ == jsTypeArray {
@@ -108,7 +198,7 @@ func (cp *compiledPage) executeStatements(scope map[string]*jsValue) *jsValue {
 			scope[stmt.Name] = stmt.Expr(scope)
 		}
 	}
-	return nil // no return encountered
+	return nil
 }
 
 func (cn *compiledNode) execute(scope map[string]*jsValue) *ssrNode {
