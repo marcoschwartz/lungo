@@ -179,6 +179,26 @@ func ExtractFunctions(source string) map[string]*Value {
 
 // CallFunc calls a function value with the given props.
 func CallFunc(scope map[string]*Value, fn *Value, props map[string]*Value) *Value {
+	if fn == nil {
+		return Undefined
+	}
+	// Handle native Go functions
+	if fn.native != nil {
+		var args []*Value
+		for _, v := range props {
+			args = append(args, v)
+		}
+		return fn.native(args)
+	}
+	// Handle arrow functions
+	if fn.str == "__arrow" {
+		var args []*Value
+		for _, v := range props {
+			args = append(args, v)
+		}
+		return callArrow(int(fn.num), args, scope)
+	}
+	// Handle regular functions with body
 	ev := &evaluator{scope: scope}
 	return ev.callFunc(fn, props)
 }

@@ -787,13 +787,7 @@ func (e *evaluator) parseArrowFunction() *Value {
 	e.expect(tokRParen)
 	e.expect(tokArrow)
 
-	// No-arg expression arrow: () => expr — evaluate immediately
-	if len(params) == 0 && e.peek().t != tokLBrace {
-		result := e.expr()
-		return &Value{typ: TypeFunc, str: "__resolved", fnParams: nil, object: map[string]*Value{"__value": result}}
-	}
-
-	// All other arrows (with params, or no-arg block body) — capture for later call
+	// Capture arrow body for deferred execution
 	var bodyToks []tok
 	isBlock := false
 	if e.peek().t == tokLBrace {
@@ -837,7 +831,15 @@ func (e *evaluator) evalFuncCall(fn *Value) *Value {
 		return fn.native(args)
 	}
 
-	if fn.str == "__noop" || fn.str == "__resolved" {
+	if fn.str == "__noop" {
+		return Undefined
+	}
+	if fn.str == "__resolved" {
+		if fn.object != nil {
+			if v, ok := fn.object["__value"]; ok {
+				return v
+			}
+		}
 		return Undefined
 	}
 	if fn.str == "__arrow" {

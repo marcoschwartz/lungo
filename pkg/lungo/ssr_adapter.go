@@ -28,14 +28,9 @@ func stubHooksInScope(scope map[string]*espresso.Value, pathname string) {
 		initial := espresso.Undefined
 		if len(args) > 0 {
 			initial = args[0]
-			// Lazy initializer: useState(() => expr)
+			// Lazy initializer: useState(() => expr) — call the function
 			if initial.Type() == espresso.TypeFunc {
-				// Try to call it
-				if initial.Custom != nil {
-					// It's a native func
-				} else {
-					initial = espresso.Undefined
-				}
+				initial = espresso.CallFunc(scope, initial, map[string]*espresso.Value{})
 			}
 		}
 		return espresso.NewArr([]*espresso.Value{
