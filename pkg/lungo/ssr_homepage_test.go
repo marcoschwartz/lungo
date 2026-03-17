@@ -1,6 +1,7 @@
 package lungo
 
 import (
+	"github.com/marcoschwartz/lungo/pkg/espresso"
 	"os"
 	"strings"
 	"testing"
@@ -174,17 +175,17 @@ func TestSSRActualHomePage(t *testing.T) {
 
 	app := New(Options{AppDir: dir + "/app", StaticDir: dir + "/static", Dev: true})
 
-	// First, check that extractDefaultExport works
+	// First, check that espresso.ExtractDefaultExport works
 	source := TranspileJSX(string(data))
-	funcBody, funcParams, err := extractDefaultExport(source)
+	funcBody, funcParams, err := espresso.ExtractDefaultExport(source)
 	if err != nil {
-		t.Fatalf("extractDefaultExport failed: %v", err)
+		t.Fatalf("espresso.ExtractDefaultExport failed: %v", err)
 	}
 	t.Logf("funcParams: %s", funcParams)
 	t.Logf("funcBody (first 300 chars): %s", truncate(funcBody, 300))
 
-	// Check extractFunctions
-	localFuncs := extractFunctions(source)
+	// Check espresso.ExtractFunctions
+	localFuncs := espresso.ExtractFunctions(source)
 	t.Logf("Local functions found: %d", len(localFuncs))
 	for name := range localFuncs {
 		t.Logf("  - %s", name)

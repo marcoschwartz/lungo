@@ -22,7 +22,11 @@ const (
 	TypeArray
 	TypeObject
 	TypeFunc
+	TypeCustom // for embedding Go objects (e.g. SSR vnodes)
 )
+
+// NativeFunc is a Go function callable from JS.
+type NativeFunc func(args []*Value) *Value
 
 // Value represents a JavaScript value.
 type Value struct {
@@ -34,6 +38,8 @@ type Value struct {
 	object   map[string]*Value
 	fnParams []string
 	fnBody   string
+	native   NativeFunc  // for Go-native functions
+	Custom   interface{} // for embedding Go objects (e.g. SSR vnodes)
 }
 
 // Undefined is the JS undefined value.
@@ -159,7 +165,7 @@ func (v *Value) truthy() bool {
 		return v.num != 0
 	case TypeString:
 		return v.str != ""
-	case TypeArray, TypeObject, TypeFunc:
+	case TypeArray, TypeObject, TypeFunc, TypeCustom:
 		return true
 	}
 	return false
@@ -257,6 +263,30 @@ func newBool(b bool) *Value      { if b { return True }; return False }
 func newArr(a []*Value) *Value   { return &Value{typ: TypeArray, array: a} }
 func newObj(o map[string]*Value) *Value { return &Value{typ: TypeObject, object: o} }
 
+// NewCustom creates a Value that wraps an arbitrary Go object.
+func NewCustom(v interface{}) *Value { return &Value{typ: TypeCustom, Custom: v} }
+
+// NewNativeFunc creates a Value wrapping a Go function callable from JS.
+func NewNativeFunc(fn NativeFunc) *Value { return &Value{typ: TypeFunc, native: fn} }
+
+// NewStr creates a string Value (exported constructor).
+func NewStr(s string) *Value { return newStr(s) }
+
+// NewNum creates a number Value (exported constructor).
+func NewNum(n float64) *Value { return newNum(n) }
+
+// NewBool creates a boolean Value (exported constructor).
+func NewBool(b bool) *Value { return newBool(b) }
+
+// NewArr creates an array Value (exported constructor).
+func NewArr(a []*Value) *Value { return newArr(a) }
+
+// NewObj creates an object Value (exported constructor).
+func NewObj(o map[string]*Value) *Value { return newObj(o) }
+
+// IsCustom returns true if the value is a custom Go object.
+func (v *Value) IsCustom() bool { return v != nil && v.typ == TypeCustom }
+
 // looseEqual implements JS == with type coercion.
 func looseEqual(a, b *Value) bool {
 	if a.typ == b.typ {
@@ -327,6 +357,18 @@ func valueToInterface(v *Value) interface{} {
 		return obj
 	}
 	return nil
+}
+
+// JsonToValue converts a JSON raw message to a Value.
+func JsonToValue(data json.RawMessage) *Value {
+	if data == nil {
+		return Null
+	}
+	var raw interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Null
+	}
+	return ToValue(raw)
 }
 
 // ToValue converts a Go value to a JS Value.

@@ -67,6 +67,11 @@ func (vm *VM) Call(fn string, args ...interface{}) (*Value, error) {
 	return ev.callFunc(fnVal, props), nil
 }
 
+// RegisterFunc registers a Go function callable from JS code.
+func (vm *VM) RegisterFunc(name string, fn NativeFunc) {
+	vm.scope[name] = NewNativeFunc(fn)
+}
+
 // Compile pre-compiles JS expression code for fast repeated execution.
 // The returned Compiled object can be executed many times without re-tokenizing.
 // It attempts closure compilation first for maximum performance.

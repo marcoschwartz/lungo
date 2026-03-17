@@ -2,6 +2,8 @@ package lungo
 
 import (
 	"strings"
+
+	"github.com/marcoschwartz/lungo/pkg/espresso"
 )
 
 // RenderSSRHTML converts an SSR vnode tree into an HTML string.
@@ -14,18 +16,21 @@ func RenderSSRHTML(node *ssrNode) string {
 	return sb.String()
 }
 
+// RenderSSRHTMLPooled uses a pooled string builder for performance.
+func RenderSSRHTMLPooled(node *ssrNode) string {
+	return RenderSSRHTML(node)
+}
+
 func renderNode(node *ssrNode, sb *strings.Builder) {
 	if node == nil {
 		return
 	}
 
-	// Text node
 	if node.IsText {
 		sb.WriteString(htmlEscape(node.Text))
 		return
 	}
 
-	// Fragment (empty tag)
 	if node.Tag == "" {
 		for _, child := range node.Children {
 			renderNode(child, sb)
@@ -33,16 +38,13 @@ func renderNode(node *ssrNode, sb *strings.Builder) {
 		return
 	}
 
-	// Opening tag
 	sb.WriteByte('<')
 	sb.WriteString(node.Tag)
 
-	// Render attributes
 	if node.Props != nil {
 		renderAttrs(node.Props, sb)
 	}
 
-	// Void elements (self-closing)
 	if isVoidElement(node.Tag) {
 		sb.WriteString(" />")
 		return
@@ -50,30 +52,26 @@ func renderNode(node *ssrNode, sb *strings.Builder) {
 
 	sb.WriteByte('>')
 
-	// Children
 	for _, child := range node.Children {
 		renderNode(child, sb)
 	}
 
-	// Closing tag
 	sb.WriteString("</")
 	sb.WriteString(node.Tag)
 	sb.WriteByte('>')
 }
 
-func renderAttrs(props map[string]*jsValue, sb *strings.Builder) {
+func renderAttrs(props map[string]*espresso.Value, sb *strings.Builder) {
 	for key, val := range props {
-		// Skip event handlers (client-only)
 		if strings.HasPrefix(key, "on") && len(key) > 2 {
 			continue
 		}
-		// Skip ref (client-only)
 		if key == "ref" || key == "key" || key == "children" || key == "dangerouslySetInnerHTML" {
 			continue
 		}
 
 		// Style object → inline style string
-		if key == "style" && val.typ == jsTypeObject {
+		if key == "style" && val.Type() == espresso.TypeObject && val.Object() != nil {
 			sb.WriteString(` style="`)
 			renderStyleObject(val, sb)
 			sb.WriteByte('"')
@@ -81,45 +79,42 @@ func renderAttrs(props map[string]*jsValue, sb *strings.Builder) {
 		}
 
 		// Boolean attributes
-		if val.typ == jsTypeBool {
-			if val.bool {
+		if val.Type() == espresso.TypeBool {
+			if val.Truthy() {
 				sb.WriteByte(' ')
 				sb.WriteString(key)
 			}
 			continue
 		}
 
-		// Skip undefined/null
-		if val.typ == jsTypeUndefined || val.typ == jsTypeNull {
+		if val.IsUndefined() || val.IsNull() {
 			continue
 		}
 
-		// Regular attribute
 		sb.WriteByte(' ')
 		sb.WriteString(key)
 		sb.WriteString(`="`)
-		sb.WriteString(htmlEscapeAttr(val.toStr()))
+		sb.WriteString(htmlEscapeAttr(val.String()))
 		sb.WriteByte('"')
 	}
 }
 
-func renderStyleObject(val *jsValue, sb *strings.Builder) {
-	if val.object == nil {
+func renderStyleObject(val *espresso.Value, sb *strings.Builder) {
+	if val.Object() == nil {
 		return
 	}
 	first := true
-	for key, v := range val.object {
-		if v.typ == jsTypeUndefined || v.typ == jsTypeNull {
+	for key, v := range val.Object() {
+		if v.IsUndefined() || v.IsNull() {
 			continue
 		}
 		if !first {
 			sb.WriteByte(';')
 		}
 		first = false
-		// Convert camelCase to kebab-case
 		sb.WriteString(camelToKebab(key))
 		sb.WriteByte(':')
-		sb.WriteString(v.toStr())
+		sb.WriteString(v.String())
 	}
 }
 
@@ -130,7 +125,7 @@ func camelToKebab(s string) string {
 			if i > 0 {
 				sb.WriteByte('-')
 			}
-			sb.WriteByte(byte(ch + 32)) // lowercase
+			sb.WriteByte(byte(ch + 32))
 		} else {
 			sb.WriteRune(ch)
 		}

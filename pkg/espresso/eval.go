@@ -832,11 +832,25 @@ func (e *evaluator) evalFuncCall(fn *Value) *Value {
 	}
 	e.expect(tokRParen)
 
+	// Native Go function
+	if fn.native != nil {
+		return fn.native(args)
+	}
+
 	if fn.str == "__noop" || fn.str == "__resolved" {
 		return Undefined
 	}
 	if fn.str == "__arrow" {
 		return callArrow(int(fn.num), args, e.scope)
+	}
+
+	// Function with body (from extractFunctions)
+	if fn.fnBody != "" {
+		props := make(map[string]*Value)
+		if len(fn.fnParams) > 0 && len(args) > 0 {
+			props[fn.fnParams[0]] = args[0]
+		}
+		return e.callFunc(fn, props)
 	}
 
 	return Undefined
