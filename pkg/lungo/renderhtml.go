@@ -52,6 +52,22 @@ func renderNode(node *ssrNode, sb *strings.Builder) {
 
 	sb.WriteByte('>')
 
+	// dangerouslySetInnerHTML — render raw HTML without escaping
+	if node.Props != nil {
+		if rawHTML, ok := node.Props["dangerouslySetInnerHTML"]; ok && !rawHTML.IsUndefined() && !rawHTML.IsNull() {
+			// Can be a string or {__html: "..."} object
+			if rawHTML.Type() == espresso.TypeObject && rawHTML.Get("__html") != nil {
+				sb.WriteString(rawHTML.Get("__html").String())
+			} else {
+				sb.WriteString(rawHTML.String())
+			}
+			sb.WriteString("</")
+			sb.WriteString(node.Tag)
+			sb.WriteByte('>')
+			return
+		}
+	}
+
 	for _, child := range node.Children {
 		renderNode(child, sb)
 	}

@@ -78,7 +78,8 @@ func stubHooksInScope(scope map[string]*espresso.Value, pathname string) {
 
 	// h() → creates SSR vnode
 	scope["h"] = espresso.NewNativeFunc(func(args []*espresso.Value) *espresso.Value {
-		return evalHCallFromArgs(scope, args)
+		result := evalHCallFromArgs(scope, args)
+		return result
 	})
 }
 
