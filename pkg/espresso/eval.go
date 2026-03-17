@@ -546,14 +546,22 @@ func (e *evaluator) equality() *Value {
 	left := e.comparison()
 	for {
 		t := e.peek().t
-		if t == tokEqEqEq || t == tokEqEq {
+		if t == tokEqEqEq {
 			e.advance()
 			right := e.comparison()
 			left = newBool(strictEqual(left, right))
-		} else if t == tokNotEqEq || t == tokNotEq {
+		} else if t == tokEqEq {
+			e.advance()
+			right := e.comparison()
+			left = newBool(looseEqual(left, right))
+		} else if t == tokNotEqEq {
 			e.advance()
 			right := e.comparison()
 			left = newBool(!strictEqual(left, right))
+		} else if t == tokNotEq {
+			e.advance()
+			right := e.comparison()
+			left = newBool(!looseEqual(left, right))
 		} else {
 			break
 		}
@@ -1982,7 +1990,7 @@ func (e *evaluator) primary() *Value {
 				e.expect(tokRParen)
 				return newNum(arg.toNum())
 			}
-			return Undefined
+			return &Value{typ: TypeFunc, str: "Number"}
 		case "parseInt":
 			e.advance()
 			if e.peek().t == tokLParen {
@@ -1995,7 +2003,7 @@ func (e *evaluator) primary() *Value {
 				if err != nil { return newNum(0) }
 				return newNum(float64(n))
 			}
-			return Undefined
+			return &Value{typ: TypeFunc, str: "parseInt"}
 		case "parseFloat":
 			e.advance()
 			if e.peek().t == tokLParen {
@@ -2006,7 +2014,7 @@ func (e *evaluator) primary() *Value {
 				if err != nil { return newNum(0) }
 				return newNum(n)
 			}
-			return Undefined
+			return &Value{typ: TypeFunc, str: "parseFloat"}
 		case "Boolean":
 			e.advance()
 			if e.peek().t == tokLParen {
@@ -2015,7 +2023,7 @@ func (e *evaluator) primary() *Value {
 				e.expect(tokRParen)
 				return newBool(arg.truthy())
 			}
-			return Undefined
+			return &Value{typ: TypeFunc, str: "Boolean"}
 		case "console":
 			e.advance()
 			if e.peek().t == tokDot {
@@ -2353,17 +2361,28 @@ func (e *evaluator) evalStatements() *Value {
 				}
 			}
 			e.expect(tokSemi)
-			// Capture condition tokens
+			// Capture condition tokens (skip without evaluating)
 			condStart := e.pos
 			if e.peek().t != tokSemi {
-				e.expr() // evaluate once to skip
+				depth := 0
+				for e.pos < len(e.tokens) {
+					tk := e.tokens[e.pos]
+					if tk.t == tokLParen { depth++ } else if tk.t == tokRParen { depth-- }
+					if tk.t == tokSemi && depth <= 0 { break }
+					e.pos++
+				}
 			}
 			condEnd := e.pos
 			e.expect(tokSemi)
-			// Capture update tokens
+			// Capture update tokens (skip without evaluating — just find the range)
 			updateStart := e.pos
 			if e.peek().t != tokRParen {
-				e.expr() // skip
+				depth := 0
+				for e.pos < len(e.tokens) {
+					tk := e.tokens[e.pos]
+					if tk.t == tokLParen { depth++ } else if tk.t == tokRParen { if depth == 0 { break }; depth-- }
+					e.pos++
+				}
 			}
 			updateEnd := e.pos
 			e.expect(tokRParen)
@@ -2392,10 +2411,9 @@ func (e *evaluator) evalStatements() *Value {
 					bodyTokens = append(bodyTokens, tok{t: tokEOF})
 					bodyEv := &evaluator{tokens: bodyTokens, pos: 0, scope: e.scope}
 					result := bodyEv.evalStatements()
-					if result != nil {
-						return result
-					}
-					// Execute update
+					if result == breakSentinel { break }
+					if result != nil && result != continueSentinel { return result }
+					// Execute update (runs even on continue)
 					updateTokens := make([]tok, updateEnd-updateStart)
 					copy(updateTokens, e.tokens[updateStart:updateEnd])
 					updateTokens = append(updateTokens, tok{t: tokEOF})
@@ -2434,9 +2452,9 @@ func (e *evaluator) evalStatements() *Value {
 					bodyTokens = append(bodyTokens, tok{t: tokEOF})
 					bodyEv := &evaluator{tokens: bodyTokens, pos: 0, scope: e.scope}
 					result := bodyEv.evalStatements()
-					if result != nil {
-						return result
-					}
+					if result == breakSentinel { break }
+					if result == continueSentinel { continue }
+					if result != nil { return result }
 				}
 			}
 			continue
@@ -2473,6 +2491,129 @@ func (e *evaluator) evalStatements() *Value {
 				e.advance()
 				if e.peek().t == tokLBrace { e.advance(); e.evalBlock() }
 			}
+			continue
+		}
+
+		// break/continue
+		if t.t == tokIdent && t.v == "break" {
+			e.advance()
+			if e.peek().t == tokSemi { e.advance() }
+			return breakSentinel
+		}
+		if t.t == tokIdent && t.v == "continue" {
+			e.advance()
+			if e.peek().t == tokSemi { e.advance() }
+			return continueSentinel
+		}
+
+		// switch statement
+		if t.t == tokIdent && t.v == "switch" {
+			e.advance()
+			e.expect(tokLParen)
+			switchVal := e.expr()
+			e.expect(tokRParen)
+			e.expect(tokLBrace)
+			matched := false
+			fallThru := false
+			done := false
+			for e.peek().t != tokRBrace && e.peek().t != tokEOF {
+				if done {
+					// Skip remaining cases after break
+					e.advance()
+					continue
+				}
+				if e.peek().t == tokIdent && e.peek().v == "case" {
+					e.advance()
+					caseVal := e.expr()
+					e.expect(tokColon)
+					if !matched && !fallThru {
+						if looseEqual(switchVal, caseVal) {
+							matched = true
+						}
+					}
+					if matched || fallThru {
+						for e.peek().t != tokRBrace && e.peek().t != tokEOF {
+							if e.peek().t == tokIdent && (e.peek().v == "case" || e.peek().v == "default") { break }
+							if e.peek().t == tokIdent && e.peek().v == "break" {
+								e.advance()
+								if e.peek().t == tokSemi { e.advance() }
+								done = true
+								break
+							}
+							if e.peek().t == tokIdent && e.peek().v == "return" {
+								e.advance()
+								result := e.expr()
+								// skip rest of switch
+								for e.peek().t != tokRBrace { e.advance() }
+								e.expect(tokRBrace)
+								return result
+							}
+							// Execute statement
+							if e.peek().t == tokIdent && (e.peek().v == "const" || e.peek().v == "let" || e.peek().v == "var") {
+								e.advance(); name := e.advance().v; e.expect(tokAssign)
+								e.scope[name] = e.expr()
+								if e.peek().t == tokSemi { e.advance() }
+							} else if e.peek().t == tokIdent {
+								name := e.peek().v
+								if e.pos+1 < len(e.tokens) && e.tokens[e.pos+1].t == tokAssign {
+									e.advance(); e.advance()
+									e.scope[name] = e.expr()
+									if e.peek().t == tokSemi { e.advance() }
+								} else {
+									e.expr()
+									if e.peek().t == tokSemi { e.advance() }
+								}
+							} else {
+								e.advance()
+							}
+						}
+					} else {
+						// Skip case body
+						for e.peek().t != tokRBrace && e.peek().t != tokEOF {
+							if e.peek().t == tokIdent && (e.peek().v == "case" || e.peek().v == "default") { break }
+							e.advance()
+						}
+					}
+				} else if e.peek().t == tokIdent && e.peek().v == "default" {
+					e.advance()
+					e.expect(tokColon)
+					if !matched {
+						matched = true
+					}
+					if matched {
+						for e.peek().t != tokRBrace && e.peek().t != tokEOF {
+							if e.peek().t == tokIdent && e.peek().v == "break" {
+								e.advance()
+								if e.peek().t == tokSemi { e.advance() }
+								break
+							}
+							if e.peek().t == tokIdent && e.peek().v == "return" {
+								e.advance()
+								result := e.expr()
+								for e.peek().t != tokRBrace { e.advance() }
+								e.expect(tokRBrace)
+								return result
+							}
+							if e.peek().t == tokIdent {
+								name := e.peek().v
+								if e.pos+1 < len(e.tokens) && e.tokens[e.pos+1].t == tokAssign {
+									e.advance(); e.advance()
+									e.scope[name] = e.expr()
+									if e.peek().t == tokSemi { e.advance() }
+								} else {
+									e.expr()
+									if e.peek().t == tokSemi { e.advance() }
+								}
+							} else {
+								e.advance()
+							}
+						}
+					}
+				} else {
+					e.advance()
+				}
+			}
+			e.expect(tokRBrace)
 			continue
 		}
 

@@ -39,6 +39,10 @@ type Value struct {
 // Undefined is the JS undefined value.
 var Undefined = &Value{typ: TypeUndefined}
 
+// Break and Continue are sentinel values for loop control flow.
+var breakSentinel = &Value{typ: TypeUndefined, str: "__break__"}
+var continueSentinel = &Value{typ: TypeUndefined, str: "__continue__"}
+
 // Null is the JS null value.
 var Null = &Value{typ: TypeNull}
 
@@ -252,6 +256,32 @@ func newNum(n float64) *Value    { return &Value{typ: TypeNumber, num: n} }
 func newBool(b bool) *Value      { if b { return True }; return False }
 func newArr(a []*Value) *Value   { return &Value{typ: TypeArray, array: a} }
 func newObj(o map[string]*Value) *Value { return &Value{typ: TypeObject, object: o} }
+
+// looseEqual implements JS == with type coercion.
+func looseEqual(a, b *Value) bool {
+	if a.typ == b.typ {
+		return strictEqual(a, b)
+	}
+	// null == undefined
+	if (a.typ == TypeNull && b.typ == TypeUndefined) || (a.typ == TypeUndefined && b.typ == TypeNull) {
+		return true
+	}
+	// number == string → compare as numbers
+	if a.typ == TypeNumber && b.typ == TypeString {
+		return a.num == b.toNum()
+	}
+	if a.typ == TypeString && b.typ == TypeNumber {
+		return a.toNum() == b.num
+	}
+	// bool == anything → convert bool to number
+	if a.typ == TypeBool {
+		return looseEqual(newNum(a.toNum()), b)
+	}
+	if b.typ == TypeBool {
+		return looseEqual(a, newNum(b.toNum()))
+	}
+	return false
+}
 
 func strictEqual(a, b *Value) bool {
 	if a.typ != b.typ {
