@@ -69,27 +69,55 @@ func (vm *VM) Call(fn string, args ...interface{}) (*Value, error) {
 
 // Compile pre-compiles JS expression code for fast repeated execution.
 // The returned Compiled object can be executed many times without re-tokenizing.
+// It attempts closure compilation first for maximum performance.
 //
 //	compiled := vm.Compile("x * 2 + 1")
 //	result := compiled.Exec(vm)
 func (vm *VM) Compile(code string) *Compiled {
-	return &Compiled{tokens: tokenizeCached(code), isExpr: true}
+	tokens := tokenizeCached(code)
+	// Try closure compilation for expression-wrapped-as-return
+	returnWrapped := make([]tok, 0, len(tokens)+2)
+	returnWrapped = append(returnWrapped, tok{t: tokIdent, v: "return"})
+	returnWrapped = append(returnWrapped, tokens...)
+	cp := compileTokens(returnWrapped)
+	return &Compiled{tokens: tokens, isExpr: true, compiled: cp}
 }
 
 // CompileStatements pre-compiles JS statements for fast repeated execution.
+// It attempts closure compilation first for maximum performance.
 func (vm *VM) CompileStatements(code string) *Compiled {
-	return &Compiled{tokens: tokenizeCached(code), isExpr: false}
+	tokens := tokenizeCached(code)
+	cp := compileTokens(tokens)
+	return &Compiled{tokens: tokens, isExpr: false, compiled: cp}
 }
 
 // Compiled is pre-compiled JS code that can be executed repeatedly
-// without re-tokenization.
+// without re-tokenization. When possible, it uses the compiled (closure)
+// path for faster execution; otherwise it falls back to the interpreted path.
 type Compiled struct {
-	tokens []tok
-	isExpr bool
+	tokens   []tok
+	isExpr   bool
+	compiled *compiledPage // non-nil if closure compilation succeeded
 }
 
 // Exec executes the compiled code using the VM's scope.
+// Uses the closure-compiled path when available, otherwise falls back to interpreted.
 func (c *Compiled) Exec(vm *VM) *Value {
+	// Fast path: use compiled closures
+	if c.compiled != nil {
+		scope := vm.copyScope()
+		result := c.compiled.execute(scope)
+		// Merge scope changes back
+		for k, v := range scope {
+			vm.scope[k] = v
+		}
+		if result == nil {
+			return Undefined
+		}
+		return result
+	}
+
+	// Fallback: interpreted path
 	toks := make([]tok, len(c.tokens))
 	copy(toks, c.tokens)
 	if c.isExpr {
@@ -105,6 +133,26 @@ func (c *Compiled) Exec(vm *VM) *Value {
 		return Undefined
 	}
 	return result
+}
+
+// CompileAndRun compiles JS statements using the closure compiler and executes them.
+// Falls back to the interpreted path if compilation fails.
+func (vm *VM) CompileAndRun(code string) (*Value, error) {
+	tokens := tokenizeCached(code)
+	cp := compileTokens(tokens)
+	if cp != nil {
+		scope := vm.copyScope()
+		result := cp.execute(scope)
+		for k, v := range scope {
+			vm.scope[k] = v
+		}
+		if result == nil {
+			return Undefined, nil
+		}
+		return result, nil
+	}
+	// Fallback to interpreted
+	return vm.Run(code)
 }
 
 // Scope returns a copy of all variables in the VM scope.
