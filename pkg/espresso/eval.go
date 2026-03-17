@@ -413,28 +413,8 @@ func evalExpr(src string, scope map[string]*Value) *Value {
 	return ev.expr()
 }
 
-// ─── Scope pooling ──────────────────────────────────────────────
 
-var scopePool = sync.Pool{
-	New: func() interface{} {
-		return make(map[string]*Value, 16)
-	},
-}
 
-func getPooledScope(parent map[string]*Value) map[string]*Value {
-	m := scopePool.Get().(map[string]*Value)
-	for k := range m {
-		delete(m, k)
-	}
-	for k, v := range parent {
-		m[k] = v
-	}
-	return m
-}
-
-func putPooledScope(m map[string]*Value) {
-	scopePool.Put(m)
-}
 
 // ─── Recursive Descent ─────────────────────────────────────────
 
@@ -634,7 +614,7 @@ func (e *evaluator) multiplicative() *Value {
 			if right.toNum() != 0 {
 				left = newNum(left.toNum() / right.toNum())
 			} else {
-				left = newNum(0)
+				left = internNum(0)
 			}
 		} else if t == tokPercent {
 			e.advance()
@@ -642,7 +622,7 @@ func (e *evaluator) multiplicative() *Value {
 			if right.toNum() != 0 {
 				left = newNum(float64(int64(left.toNum()) % int64(right.toNum())))
 			} else {
-				left = newNum(0)
+				left = internNum(0)
 			}
 		} else {
 			break
@@ -666,7 +646,7 @@ func (e *evaluator) unary() *Value {
 			e.scope[name] = nv
 			return nv
 		}
-		return newNum(1)
+		return internNum(1)
 	}
 	if e.peek().t == tokMinusMinus {
 		e.advance()
@@ -676,7 +656,7 @@ func (e *evaluator) unary() *Value {
 			e.scope[name] = nv
 			return nv
 		}
-		return newNum(-1)
+		return internNum(-1)
 	}
 	if e.peek().t == tokMinus {
 		e.advance()
@@ -899,9 +879,9 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 			}
 			return newStr(strings.Join(parts, arg.str))
 		}
-		return newStr("")
+		return internStr("")
 	case "split":
-		arg := newStr("")
+		arg := internStr("")
 		if e.peek().t != tokRParen {
 			arg = e.expr()
 		}
@@ -981,7 +961,7 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 				end = len(s)
 			}
 			if start >= end {
-				return newStr("")
+				return internStr("")
 			}
 			return newStr(s[start:end])
 		}
@@ -1076,7 +1056,7 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 		if val.typ == TypeString && count > 0 {
 			return newStr(strings.Repeat(val.str, count))
 		}
-		return newStr("")
+		return internStr("")
 	case "toLowerCase":
 		e.expect(tokRParen)
 		return newStr(strings.ToLower(val.toStr()))
@@ -1093,7 +1073,7 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 		if idx >= 0 && idx < len(s) {
 			return newStr(string(s[idx]))
 		}
-		return newStr("")
+		return internStr("")
 	case "indexOf":
 		search := e.expr()
 		e.expect(tokRParen)
@@ -1103,19 +1083,19 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 		if val.typ == TypeArray {
 			for i, item := range val.array {
 				if strictEqual(item, search) {
-					return newNum(float64(i))
+					return internNum(float64(i))
 				}
 			}
-			return newNum(-1)
+			return internNum(-1)
 		}
-		return newNum(-1)
+		return internNum(-1)
 	case "lastIndexOf":
 		search := e.expr()
 		e.expect(tokRParen)
 		if val.typ == TypeString {
 			return newNum(float64(strings.LastIndex(val.str, search.toStr())))
 		}
-		return newNum(-1)
+		return internNum(-1)
 	case "substring":
 		start := 0
 		end := -1
@@ -1248,12 +1228,12 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 		// .length() — shouldn't be called as method but handle gracefully
 		e.expect(tokRParen)
 		if val.typ == TypeArray {
-			return newNum(float64(len(val.array)))
+			return internNum(float64(len(val.array)))
 		}
 		if val.typ == TypeString {
-			return newNum(float64(len(val.str)))
+			return internNum(float64(len(val.str)))
 		}
-		return newNum(0)
+		return internNum(0)
 	case "keys":
 		// Object.keys() handled elsewhere, but arr.keys() returns indices
 		e.expect(tokRParen)
@@ -1376,7 +1356,7 @@ func (e *evaluator) evalMapFilter(val *Value, method string) *Value {
 	var results []*Value
 	for i, item := range val.array {
 		// Create child scope with callback param bound
-		childScope := make(map[string]*Value, len(e.scope)+2)
+		childScope := getScope(e.scope)
 		for k, v := range e.scope {
 			childScope[k] = v
 		}
@@ -1384,7 +1364,7 @@ func (e *evaluator) evalMapFilter(val *Value, method string) *Value {
 			childScope[params[0]] = item
 		}
 		if len(params) > 1 {
-			childScope[params[1]] = newNum(float64(i))
+			childScope[params[1]] = internNum(float64(i))
 		}
 
 		// Evaluate body tokens
@@ -1476,11 +1456,11 @@ func (e *evaluator) evalFind(val *Value) *Value {
 	paramName, bodyTokens := e.captureArrowCallback()
 
 	for _, item := range val.array {
-		childScope := getPooledScope(e.scope)
+		childScope := getScope(e.scope)
 		childScope[paramName] = item
 		childEval := &evaluator{tokens: bodyTokens, pos: 0, scope: childScope}
 		result := childEval.expr()
-		putPooledScope(childScope)
+		putScope(childScope)
 		if result.truthy() {
 			return item
 		}
@@ -1492,22 +1472,22 @@ func (e *evaluator) evalFind(val *Value) *Value {
 func (e *evaluator) evalFindIndex(val *Value) *Value {
 	if val.typ != TypeArray {
 		e.skipBalanced(tokLParen, tokRParen)
-		return newNum(-1)
+		return internNum(-1)
 	}
 
 	paramName, bodyTokens := e.captureArrowCallback()
 
 	for i, item := range val.array {
-		childScope := getPooledScope(e.scope)
+		childScope := getScope(e.scope)
 		childScope[paramName] = item
 		childEval := &evaluator{tokens: bodyTokens, pos: 0, scope: childScope}
 		result := childEval.expr()
-		putPooledScope(childScope)
+		putScope(childScope)
 		if result.truthy() {
-			return newNum(float64(i))
+			return internNum(float64(i))
 		}
 	}
-	return newNum(-1)
+	return internNum(-1)
 }
 
 // evalSomeEvery handles array.some/every(item => condition)
@@ -1523,11 +1503,11 @@ func (e *evaluator) evalSomeEvery(val *Value, method string) *Value {
 	paramName, bodyTokens := e.captureArrowCallback()
 
 	for _, item := range val.array {
-		childScope := getPooledScope(e.scope)
+		childScope := getScope(e.scope)
 		childScope[paramName] = item
 		childEval := &evaluator{tokens: bodyTokens, pos: 0, scope: childScope}
 		result := childEval.expr()
-		putPooledScope(childScope)
+		putScope(childScope)
 		if method == "some" && result.truthy() {
 			return True
 		}
@@ -1620,15 +1600,15 @@ func (e *evaluator) evalReduce(val *Value) *Value {
 	}
 
 	for i := startIdx; i < len(arr); i++ {
-		childScope := getPooledScope(e.scope)
+		childScope := getScope(e.scope)
 		childScope[accParam] = accumulator
 		childScope[itemParam] = arr[i]
 		if len(params) > 2 {
-			childScope[params[2]] = newNum(float64(i))
+			childScope[params[2]] = internNum(float64(i))
 		}
 		childEval := &evaluator{tokens: bodyTokens, pos: 0, scope: childScope}
 		accumulator = childEval.expr()
-		putPooledScope(childScope)
+		putScope(childScope)
 	}
 
 	return accumulator
@@ -1789,7 +1769,7 @@ func (e *evaluator) primary() *Value {
 				exprStr := raw[start:i]
 				if i < len(raw) { i++ } // skip }
 				// Evaluate the expression
-				exprTokens := tokenize(exprStr)
+				exprTokens := tokenizeCached(exprStr)
 				exprEv := &evaluator{tokens: exprTokens, pos: 0, scope: e.scope}
 				val := exprEv.expr()
 				sb.WriteString(val.toStr())
@@ -2000,7 +1980,7 @@ func (e *evaluator) primary() *Value {
 				if e.peek().t == tokComma { e.advance(); e.expr() }
 				e.expect(tokRParen)
 				n, err := strconv.ParseInt(strings.TrimSpace(arg.toStr()), 10, 64)
-				if err != nil { return newNum(0) }
+				if err != nil { return internNum(0) }
 				return newNum(float64(n))
 			}
 			return &Value{typ: TypeFunc, str: "parseInt"}
@@ -2011,7 +1991,7 @@ func (e *evaluator) primary() *Value {
 				arg := e.expr()
 				e.expect(tokRParen)
 				n, err := strconv.ParseFloat(strings.TrimSpace(arg.toStr()), 64)
-				if err != nil { return newNum(0) }
+				if err != nil { return internNum(0) }
 				return newNum(n)
 			}
 			return &Value{typ: TypeFunc, str: "parseFloat"}
@@ -2085,7 +2065,7 @@ func (e *evaluator) primary() *Value {
 						return newNum(n)
 					case "random":
 						e.expect(tokRParen)
-						return newNum(0)
+						return internNum(0)
 					}
 				}
 			}

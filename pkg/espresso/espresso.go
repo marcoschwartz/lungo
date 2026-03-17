@@ -31,38 +31,23 @@ func (vm *VM) Get(name string) *Value {
 }
 
 // Eval evaluates a JS expression and returns the result.
-//
-//	vm.Set("x", 10)
-//	result, _ := vm.Eval("x * 2 + 1")
-//	fmt.Println(result.Number()) // 21
+// Uses token caching — repeated calls with the same code skip tokenization.
 func (vm *VM) Eval(code string) (*Value, error) {
-	tokens := tokenize(code)
-	ev := &evaluator{tokens: tokens, pos: 0, scope: vm.copyScope()}
-	result := ev.expr()
-	// Write back any scope changes
-	for k, v := range ev.scope {
-		vm.scope[k] = v
-	}
-	return result, nil
+	tokens := tokenizeCached(code)
+	ev := &evaluator{tokens: tokens, pos: 0, scope: vm.scope}
+	return ev.expr(), nil
 }
 
 // Run evaluates multiple JS statements (const, let, if, for, return, etc.).
 // Returns the value of the last return statement, or Undefined.
-//
-//	result, _ := vm.Run(`
-//	  const items = [1, 2, 3, 4, 5];
-//	  const sum = items.reduce((a, b) => a + b, 0);
-//	  return sum;
-//	`)
-//	fmt.Println(result.Number()) // 15
 func (vm *VM) Run(code string) (*Value, error) {
-	tokens := tokenize(code)
+	tokens := tokenizeCached(code)
 	ev := &evaluator{tokens: tokens, pos: 0, scope: vm.copyScope()}
 	result := ev.evalStatements()
 	for k, v := range ev.scope {
 		vm.scope[k] = v
 	}
-	if result == nil {
+	if result == nil || result == breakSentinel || result == continueSentinel {
 		return Undefined, nil
 	}
 	return result, nil
@@ -80,6 +65,46 @@ func (vm *VM) Call(fn string, args ...interface{}) (*Value, error) {
 	}
 	ev := &evaluator{scope: vm.copyScope()}
 	return ev.callFunc(fnVal, props), nil
+}
+
+// Compile pre-compiles JS expression code for fast repeated execution.
+// The returned Compiled object can be executed many times without re-tokenizing.
+//
+//	compiled := vm.Compile("x * 2 + 1")
+//	result := compiled.Exec(vm)
+func (vm *VM) Compile(code string) *Compiled {
+	return &Compiled{tokens: tokenizeCached(code), isExpr: true}
+}
+
+// CompileStatements pre-compiles JS statements for fast repeated execution.
+func (vm *VM) CompileStatements(code string) *Compiled {
+	return &Compiled{tokens: tokenizeCached(code), isExpr: false}
+}
+
+// Compiled is pre-compiled JS code that can be executed repeatedly
+// without re-tokenization.
+type Compiled struct {
+	tokens []tok
+	isExpr bool
+}
+
+// Exec executes the compiled code using the VM's scope.
+func (c *Compiled) Exec(vm *VM) *Value {
+	toks := make([]tok, len(c.tokens))
+	copy(toks, c.tokens)
+	if c.isExpr {
+		ev := &evaluator{tokens: toks, pos: 0, scope: vm.scope}
+		return ev.expr()
+	}
+	ev := &evaluator{tokens: toks, pos: 0, scope: vm.copyScope()}
+	result := ev.evalStatements()
+	for k, v := range ev.scope {
+		vm.scope[k] = v
+	}
+	if result == nil || result == breakSentinel || result == continueSentinel {
+		return Undefined
+	}
+	return result
 }
 
 // Scope returns a copy of all variables in the VM scope.
