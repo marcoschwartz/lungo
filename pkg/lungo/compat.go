@@ -248,8 +248,10 @@ func convertAttrOutsideStrings(s, from, to string) string {
 	// Match as JSX attribute: preceded by whitespace, followed by = or whitespace or >
 	re := regexp.MustCompile(`(\s)` + from + `([\s=>])`)
 	s = re.ReplaceAllString(s, "${1}"+to+"${2}")
-	// Match in destructuring/args: preceded by { , ( and followed by , ) } whitespace
-	re2 := regexp.MustCompile(`([{,(])(\s*)` + from + `(\s*[,})])`)
-	s = re2.ReplaceAllString(s, "${1}${2}"+to+"${3}")
+	// Match in destructuring/args — but skip if `to` is a JS reserved word (e.g. "class")
+	if to != "class" && to != "for" {
+		re2 := regexp.MustCompile(`([{,(])(\s*)` + from + `(\s*[,})])`)
+		s = re2.ReplaceAllString(s, "${1}${2}"+to+"${3}")
+	}
 	return s
 }
