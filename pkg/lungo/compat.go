@@ -204,8 +204,8 @@ func stripTypeScript(s string) string {
 
 // convertAttributes converts React attribute conventions to HTML.
 func convertAttributes(s string) string {
-	// className → class (but not inside strings or comments)
-	s = convertAttrOutsideStrings(s, "className", "class")
+	// className is handled by the runtime (h() converts it to "class" for HTML elements).
+	// Don't rename here — it breaks component props that accept className.
 
 	// React event handlers → lowercase HTML events
 	eventMap := map[string]string{
@@ -236,8 +236,8 @@ func convertAttributes(s string) string {
 		s = convertAttrOutsideStrings(s, react, html)
 	}
 
-	// htmlFor → for
-	s = convertAttrOutsideStrings(s, "htmlFor", "for")
+	// htmlFor is handled by the runtime and SSR renderer.
+	// Don't rename here — same issue as className.
 
 	return s
 }

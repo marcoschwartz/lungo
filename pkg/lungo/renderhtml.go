@@ -85,6 +85,12 @@ func renderAttrs(props map[string]*espresso.Value, sb *strings.Builder) {
 		if key == "ref" || key == "key" || key == "children" || key == "dangerouslySetInnerHTML" {
 			continue
 		}
+		// React → HTML attribute mapping
+		if key == "className" {
+			key = "class"
+		} else if key == "htmlFor" {
+			key = "for"
+		}
 
 		// Style object → inline style string
 		if key == "style" && val.Type() == espresso.TypeObject && val.Object() != nil {
