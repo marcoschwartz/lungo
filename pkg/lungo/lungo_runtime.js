@@ -1116,51 +1116,61 @@
 
       const loadPage = async () => {
         try {
-          // Load module and page data in parallel
-          const fetches = [
-            pageModuleCache.get(matched.pagePath)
-              ? Promise.resolve(pageModuleCache.get(matched.pagePath))
-              : import(matched.pagePath).then(m => { pageModuleCache.set(matched.pagePath, m); return m; }),
-            fetch("/_data" + router.pathname)
-              .then(r => r.ok ? r.json() : {})
-              .catch(() => ({})),
-          ];
-
-          // On refresh, also re-fetch layout loader data
-          if (isRefresh) {
-            fetches.push(
-              fetch("/_data" + router.pathname + "?_layouts=1")
-                .then(r => r.ok ? r.json() : null)
-                .catch(() => null)
-            );
-          }
-
-          const results = await Promise.all(fetches);
-          const mod = results[0];
-          const loaderData = results[1];
-          const newLayoutData = results[2] || null;
+          // Fetch server-rendered page fragment (like Next.js RSC)
+          const pageRes = await fetch("/_page" + router.pathname);
+          if (!pageRes.ok) throw new Error("Failed to load page");
+          const pageData = await pageRes.json();
 
           // Ignore if a newer navigation happened while we were loading
           if (thisNav !== navId.current) return;
 
-          // Update layout data if refreshed
-          if (newLayoutData) {
-            for (const entry of layouts) {
-              if (entry && entry.component) {
-                for (const key of Object.keys(newLayoutData)) {
-                  entry.data = newLayoutData[key];
+          // On refresh, also re-fetch layout loader data
+          if (isRefresh) {
+            try {
+              const layoutRes = await fetch("/_data" + router.pathname + "?_layouts=1");
+              if (layoutRes.ok) {
+                const newLayoutData = await layoutRes.json();
+                if (newLayoutData) {
+                  for (const entry of layouts) {
+                    if (entry && entry.component) {
+                      for (const key of Object.keys(newLayoutData)) {
+                        entry.data = newLayoutData[key];
+                      }
+                    }
+                  }
                 }
               }
-            }
+            } catch (_) {}
           }
 
-          // Swap everything in one state update — old page stays visible until now
-          setView({
-            Page: mod.default,
-            data: (loaderData && Object.keys(loaderData).length > 0) ? loaderData : {},
-            params: matchedParams,
-            error: null,
-          });
+          // Also try to import the page module for client-side interactivity
+          let PageComponent = null;
+          try {
+            const mod = pageModuleCache.get(matched.pagePath)
+              || await import(matched.pagePath).then(m => { pageModuleCache.set(matched.pagePath, m); return m; });
+            PageComponent = mod.default;
+          } catch (_) {
+            // Module import failed — use server-rendered HTML via a wrapper component
+          }
+
+          if (PageComponent) {
+            // Interactive page — use the component directly
+            setView({
+              Page: PageComponent,
+              data: pageData.data || {},
+              params: matchedParams,
+              error: null,
+            });
+          } else {
+            // Server-only page — inject server-rendered HTML
+            const ServerPage = () => h("div", { dangerouslySetInnerHTML: { __html: pageData.html } });
+            setView({
+              Page: ServerPage,
+              data: pageData.data || {},
+              params: matchedParams,
+              error: null,
+            });
+          }
 
           // Restore or reset scroll after render
           if (!isRefresh) requestAnimationFrame(() => restoreScroll(router.pathname));

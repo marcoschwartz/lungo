@@ -286,6 +286,12 @@ func (a *App) buildHandler() http.Handler {
 			return
 		}
 
+		// 6b. Server-rendered page fragment for client-side navigation
+		if r.Method == http.MethodGet && strings.HasPrefix(path, "/_page/") {
+			a.servePageFragment(w, r)
+			return
+		}
+
 		// 7. Skip static file extensions
 		if r.Method == http.MethodGet && filepath.Ext(path) != "" && path != "/" {
 			http.NotFound(w, r)

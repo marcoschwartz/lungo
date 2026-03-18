@@ -9,6 +9,52 @@ import (
 	"time"
 )
 
+// servePageFragment renders just the page HTML (no shell/layout) for client-side navigation.
+// This is similar to Next.js RSC payloads — the server renders the component and sends HTML
+// so the client never needs to execute server-component code.
+func (a *App) servePageFragment(w http.ResponseWriter, r *http.Request) {
+	pagePath := strings.TrimPrefix(r.URL.Path, "/_page")
+	if pagePath == "" {
+		pagePath = "/"
+	}
+
+	route := a.router.Match(pagePath)
+	if route == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Fetch loader data if the page has a loader
+	var loaderData json.RawMessage
+	if route.HasLoader && route.LoaderURL != "" {
+		loaderData = a.fetchLoaderData(route, r)
+	}
+
+	// SSR-render just the page component
+	pageHTML, _, err := a.evaluatePageSSR(route.PagePath, loaderData, route.Segments)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write([]byte(`{"error":"` + err.Error() + `"}`))
+		return
+	}
+
+	// Return JSON with the rendered HTML and loader data
+	response := struct {
+		HTML string          `json:"html"`
+		Data json.RawMessage `json:"data,omitempty"`
+	}{
+		HTML: pageHTML,
+		Data: loaderData,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if !a.opts.Dev {
+		w.Header().Set("Cache-Control", "public, max-age=5, stale-while-revalidate=30")
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
 func (a *App) serveSSR(w http.ResponseWriter, r *http.Request) {
 	route := a.router.Match(r.URL.Path)
 	if route == nil {
