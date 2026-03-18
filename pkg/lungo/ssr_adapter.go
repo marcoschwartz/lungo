@@ -78,8 +78,46 @@ func stubHooksInScope(scope map[string]*espresso.Value, pathname string) {
 
 	// h() → creates SSR vnode
 	scope["h"] = espresso.NewNativeFunc(func(args []*espresso.Value) *espresso.Value {
-		result := evalHCallFromArgs(scope, args)
-		return result
+		return evalHCallFromArgs(scope, args)
+	})
+
+	// Image component — renders <img> with loading/priority attributes
+	scope["Image"] = espresso.NewNativeFunc(func(args []*espresso.Value) *espresso.Value {
+		props := make(map[string]*espresso.Value)
+		if len(args) > 0 && args[0].Type() == espresso.TypeObject {
+			for k, v := range args[0].Object() {
+				props[k] = v
+			}
+		}
+
+		node := &ssrNode{Tag: "img", Props: make(map[string]*espresso.Value)}
+
+		// Copy src, alt, class, width, height
+		for _, attr := range []string{"src", "alt", "class", "width", "height", "style"} {
+			if v, ok := props[attr]; ok && !v.IsUndefined() {
+				node.Props[attr] = v
+			}
+		}
+
+		// Priority images: eager loading + high fetch priority
+		if p, ok := props["priority"]; ok && p.Truthy() {
+			node.Props["loading"] = espresso.NewStr("eager")
+			node.Props["fetchpriority"] = espresso.NewStr("high")
+			node.Props["decoding"] = espresso.NewStr("sync")
+		} else {
+			// Default: lazy loading
+			node.Props["loading"] = espresso.NewStr("lazy")
+			node.Props["decoding"] = espresso.NewStr("async")
+		}
+
+		// Placeholder blur support
+		if ph, ok := props["placeholder"]; ok && ph.String() == "blur" {
+			if blur, ok := props["blurDataURL"]; ok {
+				node.Props["style"] = espresso.NewStr("background-image:url(" + blur.String() + ");background-size:cover;background-repeat:no-repeat")
+			}
+		}
+
+		return espresso.NewCustom(node)
 	})
 }
 

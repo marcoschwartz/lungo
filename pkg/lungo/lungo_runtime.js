@@ -688,16 +688,12 @@
   }
 
   // ─── Hydration ────────────────────────────────────────────────────
+  // Resilient hydration: reuses existing SSR DOM nodes where possible,
+  // patches mismatches in-place instead of throwing and re-rendering.
 
   function hydrate(vnode, container) {
-    try {
-      hydrateNode(vnode, container.firstElementChild || container.firstChild, container);
-      container.__vnode = vnode;
-    } catch (e) {
-      // Hydration mismatch — fall back to full client render (same as React/Next.js)
-      console.warn("[Lungo] Hydration mismatch, falling back to client render:", e.message, "\n  Stack:", e.stack?.split("\n").slice(1,3).join("\n  "));
-      render(vnode, container);
-    }
+    hydrateNode(vnode, container.firstElementChild || container.firstChild, container);
+    container.__vnode = vnode;
   }
 
   function hydrateNode(vnode, dom, parentDom) {
@@ -705,13 +701,28 @@
 
     // Text node
     if (vnode.tag === TEXT_NODE) {
-      if (!dom) throw new Error("no DOM for text node");
-      // Find the text node (skip element nodes)
-      while (dom && dom.nodeType !== 3) {
-        dom = dom.nextSibling;
+      if (dom && dom.nodeType === 3) {
+        // Reuse existing text node, update if different
+        if (dom.textContent !== vnode._text) dom.textContent = vnode._text;
+        vnode._dom = dom;
+      } else if (dom && dom.nodeType !== 3) {
+        // SSR has element where we expect text — find text sibling
+        let textDom = dom;
+        while (textDom && textDom.nodeType !== 3) textDom = textDom.nextSibling;
+        if (textDom) {
+          vnode._dom = textDom;
+        } else {
+          // No text node found — create one
+          const newText = document.createTextNode(vnode._text);
+          parentDom.insertBefore(newText, dom);
+          vnode._dom = newText;
+        }
+      } else {
+        // No DOM at all — create text node
+        const newText = document.createTextNode(vnode._text || "");
+        parentDom.appendChild(newText);
+        vnode._dom = newText;
       }
-      if (!dom) throw new Error("no text DOM found");
-      vnode._dom = dom;
       return;
     }
 
@@ -720,10 +731,14 @@
       dom = dom.nextSibling;
     }
 
-    if (!dom) throw new Error("no DOM for <" + vnode.tag + ">");
-
     // Component
     if (typeof vnode.tag === "function") {
+      if (!dom) {
+        // No SSR DOM — render from scratch into parent
+        const newDom = createDom(vnode, parentDom);
+        parentDom.appendChild(newDom);
+        return;
+      }
       const props = vnode.children.length > 0
         ? Object.assign({}, vnode.props, { children: vnode.children })
         : vnode.props;
@@ -743,14 +758,25 @@
       return;
     }
 
-    // Element — validate tag match
-    if (dom.nodeType !== 1) {
-      throw new Error("expected element for <" + vnode.tag + ">, got nodeType " + dom.nodeType);
-    }
-    if (dom.tagName.toLowerCase() !== vnode.tag.toLowerCase()) {
-      throw new Error("tag mismatch: SSR <" + dom.tagName.toLowerCase() + "> vs client <" + vnode.tag + ">");
+    // No DOM node — create element from scratch
+    if (!dom) {
+      const newDom = createDom(vnode, parentDom);
+      parentDom.appendChild(newDom);
+      return;
     }
 
+    // Element — check tag match
+    if (dom.nodeType !== 1 || dom.tagName.toLowerCase() !== vnode.tag.toLowerCase()) {
+      // Mismatch — replace this node only (don't destroy entire tree)
+      if (window.__LUNGO_DEV__) {
+        console.warn("[Lungo] Hydration mismatch at <" + vnode.tag + ">: SSR has <" + (dom.tagName || "text").toLowerCase() + ">, patching in-place");
+      }
+      const newDom = createDom(vnode, parentDom);
+      dom.parentNode.replaceChild(newDom, dom);
+      return;
+    }
+
+    // Tag matches — reuse DOM node
     vnode._dom = dom;
 
     // dangerouslySetInnerHTML — skip child hydration, SSR HTML is already correct
@@ -761,14 +787,12 @@
 
     setProps(dom, EMPTY_OBJ, vnode.props);
 
-    // Set refs during hydration (setProps skips them)
+    // Set refs
     if (vnode.props.ref && typeof vnode.props.ref === "object") {
       vnode.props.ref.current = dom;
     }
 
-    // Hydrate children — matches vnode children to DOM children.
-    // Handles: empty text vnodes (no DOM node), adjacent text merging,
-    // and whitespace-only text DOM nodes.
+    // Hydrate children — resilient matching
     let childDom = dom.firstChild;
     const children = vnode.children;
     let i = 0;
@@ -783,33 +807,40 @@
           textGroup.push(children[i]);
         }
 
-        // Check if the combined text is empty (SSR skips empty strings)
         const combinedText = textGroup.map(t => t._text).join("");
         if (!combinedText) {
-          // All empty text vnodes — no matching DOM node exists, skip
           i++;
           continue;
         }
 
-        // Match to current DOM node if it's a text node
+        // Find or create text node
         if (childDom && childDom.nodeType === 3) {
-          for (const tv of textGroup) {
-            tv._dom = childDom;
-          }
+          for (const tv of textGroup) tv._dom = childDom;
           childDom = childDom.nextSibling;
+        } else {
+          // Create missing text node
+          const newText = document.createTextNode(combinedText);
+          if (childDom) {
+            dom.insertBefore(newText, childDom);
+          } else {
+            dom.appendChild(newText);
+          }
+          for (const tv of textGroup) tv._dom = newText;
         }
-        // If current DOM node is not text, the text was merged or missing — skip
       } else {
         // Element vnode — skip whitespace-only text DOM nodes
         while (childDom && childDom.nodeType === 3 && !childDom.textContent.trim()) {
           childDom = childDom.nextSibling;
         }
+
         if (!childDom) {
-          const cls = dom.className ? " class=\"" + dom.className.substring(0, 50) + "\"" : "";
-          throw new Error("more vnode children than DOM in <" + vnode.tag + cls + "> (child " + i + "/" + children.length + ", expect <" + child.tag + ">)");
+          // More vnode children than DOM — create remaining
+          const newDom = createDom(child, dom);
+          dom.appendChild(newDom);
+        } else {
+          hydrateNode(child, childDom, dom);
+          childDom = childDom.nextSibling;
         }
-        hydrateNode(child, childDom, dom);
-        childDom = childDom.nextSibling;
       }
       i++;
     }
@@ -1186,7 +1217,36 @@
     navigate,
     createVNode,
     RouterView,
+    Image,
   };
+
+  // ─── Image Component ─────────────────────────────────────────────
+  // Built-in component for optimized image loading.
+  // Usage: <Image src="..." alt="..." priority />
+  function Image(props) {
+    const imgProps = { src: props.src, alt: props.alt || "" };
+    if (props.class) imgProps.class = props.class;
+    if (props.width) imgProps.width = props.width;
+    if (props.height) imgProps.height = props.height;
+    if (props.style) imgProps.style = props.style;
+
+    if (props.priority) {
+      imgProps.loading = "eager";
+      imgProps.fetchpriority = "high";
+      imgProps.decoding = "sync";
+    } else {
+      imgProps.loading = "lazy";
+      imgProps.decoding = "async";
+    }
+
+    // Blur placeholder
+    if (props.placeholder === "blur" && props.blurDataURL) {
+      imgProps.style = (imgProps.style || "") +
+        ";background-image:url(" + props.blurDataURL + ");background-size:cover";
+    }
+
+    return h("img", imgProps);
+  }
 
   window.Lungo = Lungo;
   if (typeof globalThis !== "undefined") globalThis.Lungo = Lungo;
