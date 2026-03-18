@@ -214,7 +214,12 @@ func stripTypeScript(s string) string {
 	s = regexp.MustCompile(`\s+as\s+\w+(?:<[^>]*>)?`).ReplaceAllString(s, "")
 
 	// Remove generic type params from functions: <T>(  → (
-	s = regexp.MustCompile(`<\w+(?:\s+extends\s+[^>]+)?>`).ReplaceAllString(s, "")
+	// Only match if preceded by function name/identifier and followed by (
+	s = regexp.MustCompile(`(\w)\s*<\w+(?:\s+extends\s+[^>]+)?>\s*\(`).ReplaceAllStringFunc(s, func(m string) string {
+		// Keep the leading char and opening paren, remove the generic
+		re := regexp.MustCompile(`(\w)\s*<\w+(?:\s+extends\s+[^>]+)?>\s*\(`)
+		return re.ReplaceAllString(m, "$1(")
+	})
 
 	// Remove React.FC, React.ReactNode etc.
 	s = regexp.MustCompile(`:\s*React\.\w+`).ReplaceAllString(s, "")
