@@ -1217,13 +1217,15 @@
     navigate,
     createVNode,
     RouterView,
-    Image,
+    LungoImage,
+    Image: LungoImage,
   };
 
   // ─── Image Component ─────────────────────────────────────────────
   // Built-in component for optimized image loading.
   // Usage: <Image src="..." alt="..." priority />
-  function Image(props) {
+  // Exported as LungoImage to avoid conflict with browser's Image constructor
+  function LungoImage(props) {
     const imgProps = { src: props.src, alt: props.alt || "" };
     if (props.class) imgProps.class = props.class;
     if (props.width) imgProps.width = props.width;
