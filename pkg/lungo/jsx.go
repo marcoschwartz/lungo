@@ -241,25 +241,6 @@ func (t *jsxTranspiler) parseJSXChildren(closeTag string, preserveWhitespace boo
 			break
 		}
 
-		// Check for MISMATCHED closing tag: </something> that doesn't match
-		if t.pos+2 < len(t.src) && t.src[t.pos] == '<' && t.src[t.pos+1] == '/' {
-			// Extract the closing tag name
-			endTagStart := t.pos + 2
-			endTagEnd := endTagStart
-			for endTagEnd < len(t.src) && t.src[endTagEnd] != '>' {
-				endTagEnd++
-			}
-			if endTagEnd < len(t.src) {
-				foundClose := "</" + t.src[endTagStart:endTagEnd] + ">"
-				if foundClose != closeTag {
-					// Mismatch! Log error and consume the wrong close tag
-					t.errors = append(t.errors, "JSX tag mismatch: expected "+closeTag+" but found "+foundClose)
-					t.pos = endTagEnd + 1
-					break
-				}
-			}
-		}
-
 		ch := t.src[t.pos]
 
 		// Expression child: {expr}
@@ -296,6 +277,11 @@ func (t *jsxTranspiler) parseJSXChildren(closeTag string, preserveWhitespace boo
 				children = append(children, `"`+escapeJSString(collapsed)+`"`)
 			}
 		}
+	}
+
+	// If we exited because maxIter ran out, it's a real mismatch
+	if maxIter <= 0 {
+		t.errors = append(t.errors, "JSX tag never closed: "+closeTag+" (possible tag mismatch)")
 	}
 
 	return children
