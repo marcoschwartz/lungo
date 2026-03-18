@@ -590,15 +590,27 @@ func convertLayout(s string) string {
 
 	// If the default Layout just wraps an inlined component (e.g. AppLayout),
 	// promote that component to be the default Layout directly and remove the wrapper.
-	// This avoids the indirection that breaks Lungo's client-side navigation.
-	wrapperRe := regexp.MustCompile(`export default function Layout\([^)]*\)\s*\{[^}]*return\s*\(?<?>\s*<(\w+)>\s*\{?\s*children\s*\}?\s*</\w+>[\s\S]*?</?>\s*\)?\s*;\s*\}`)
-	if m := wrapperRe.FindStringSubmatch(s); m != nil {
-		wrappedName := m[1] // e.g. "AppLayout"
-		// Rename the inlined component to Layout and remove the old default export
-		s = strings.Replace(s, "function "+wrappedName+"(", "export default function Layout(", 1)
-		s = wrapperRe.ReplaceAllString(s, "")
-		// Remove any components that were siblings in the fragment (AnalyticsScript, FacebookPixel)
-		// They're already defined as functions but won't be called
+	// Detect: the export default function's body contains <ComponentName>{children}</ComponentName>
+	defaultFuncIdx := strings.Index(s, "export default function Layout(")
+	if defaultFuncIdx >= 0 {
+		// Extract the body of the default export
+		bodyStart := strings.Index(s[defaultFuncIdx:], "{")
+		if bodyStart >= 0 {
+			bodyStart += defaultFuncIdx
+			// Find the component being wrapped: <Name>{children}</Name> or <Name>\n  {children}\n</Name>
+			wrapRe := regexp.MustCompile(`<(\w+)>\s*\{?\s*children\s*\}?\s*</\w+>`)
+			bodySection := s[bodyStart:]
+			if m := wrapRe.FindStringSubmatch(bodySection); m != nil {
+				wrappedName := m[1]
+				// Check it's a local function (inlined component), not an HTML tag
+				if strings.Contains(s, "function "+wrappedName+"(") {
+					// Promote: rename the inlined function to be the default export
+					s = strings.Replace(s, "function "+wrappedName+"(", "export default function Layout(", 1)
+					// Remove the old default export function entirely
+					s = s[:defaultFuncIdx] // cut everything from the old export default onward
+				}
+			}
+		}
 	}
 
 	// Remove <html ...> and </html>
