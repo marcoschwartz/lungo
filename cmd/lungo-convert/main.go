@@ -143,11 +143,11 @@ func (c *converter) convertPages() {
 			return nil
 		}
 
-		// Skip non-page/layout files
+		// Skip non-page/layout files (but warn about components)
 		base := strings.TrimSuffix(name, filepath.Ext(name))
 		if base != "page" && base != "layout" && base != "loading" && base != "error" && base != "not-found" {
-			// Could be a component file — check if it's in a _components or _lib dir
 			if strings.Contains(rel, "_components") || strings.Contains(rel, "_lib") || strings.Contains(rel, "lib/") {
+				c.warnings = append(c.warnings, "Component not auto-converted (inline into layout/pages): "+rel)
 				return nil
 			}
 			c.warnings = append(c.warnings, "Skipped non-page file: "+rel)
@@ -177,6 +177,9 @@ func (c *converter) convertFile(srcPath, relPath string) {
 
 	// Convert Next.js patterns
 	content = convertNextPatterns(content)
+
+	// Collapse span-per-token code blocks into single pre/code
+	content = collapseCodeBlocks(content)
 
 	// Convert server components (async function with fetch)
 	content, hasLoader := convertServerComponent(content)
@@ -326,6 +329,89 @@ func convertNextPatterns(s string) string {
 	s = strings.ReplaceAll(s, "</Suspense>", "")
 
 	return s
+}
+
+// ── Code block collapsing ────────────────────────────
+// Converts <pre><code><span>{"text"}</span>...</code></pre>
+// into <pre><code>{`text...`}</code></pre>
+
+func collapseCodeBlocks(s string) string {
+	// Find blocks of <span className="...">{"text"}</span> inside <pre><code>
+	// and collapse them into a single template literal
+
+	lines := strings.Split(s, "\n")
+	var result []string
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Detect start of code block: <pre ...>
+		if strings.Contains(trimmed, "<pre") && i+1 < len(lines) {
+			nextTrimmed := strings.TrimSpace(lines[i+1])
+			if nextTrimmed == "<code>" || strings.HasPrefix(nextTrimmed, "<code>") {
+				// Found <pre>...<code> — collect spans
+				preTag := strings.TrimSpace(line)
+				i += 2 // skip pre and code lines
+
+				var spans []string
+				hasSpanPattern := false
+				for i < len(lines) {
+					spanLine := strings.TrimSpace(lines[i])
+					if spanLine == "</code>" || strings.HasPrefix(spanLine, "</code>") {
+						i++ // skip </code>
+						// Skip </pre> too
+						if i < len(lines) && strings.TrimSpace(lines[i]) == "</pre>" {
+							i++
+						}
+						break
+					}
+					// Check for span pattern: <span className="...">{"text"}</span>
+					if strings.Contains(spanLine, "<span") && strings.Contains(spanLine, `>{"`) {
+						hasSpanPattern = true
+					}
+					spans = append(spans, lines[i])
+					i++
+				}
+
+				if hasSpanPattern && len(spans) > 0 {
+					// Extract text from spans
+					spanRe := regexp.MustCompile(`<span[^>]*>\{"([^"]*)"\}</span>`)
+					var codeText strings.Builder
+					for _, sl := range spans {
+						matches := spanRe.FindAllStringSubmatch(sl, -1)
+						for _, m := range matches {
+							text := m[1]
+							text = strings.ReplaceAll(text, `\"`, `"`)
+							text = strings.ReplaceAll(text, `\n`, "\n")
+							text = strings.ReplaceAll(text, `\t`, "\t")
+							codeText.WriteString(text)
+						}
+					}
+					code := codeText.String()
+					code = strings.ReplaceAll(code, "`", "\\`")
+					code = strings.ReplaceAll(code, "${", "\\${")
+
+					// Get indentation from original pre line
+					indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+					result = append(result, indent+preTag)
+					result = append(result, indent+"  <code>{`"+code+"`}</code>")
+					result = append(result, indent+"</pre>")
+					continue
+				} else {
+					// Not a span pattern — output as-is
+					result = append(result, line)
+					result = append(result, "                <code>")
+					result = append(result, spans...)
+					continue
+				}
+			}
+		}
+
+		result = append(result, line)
+		i++
+	}
+	return strings.Join(result, "\n")
 }
 
 // ── Server component conversion ──────────────────────
