@@ -61,6 +61,7 @@ type converter struct {
 	warnings  []string
 	apiRoutes []apiRoute
 	envVars   map[string]string
+	appDir    string // resolved app/ directory path
 }
 
 func (c *converter) run() {
@@ -115,17 +116,17 @@ func (c *converter) run() {
 // ── Page conversion ──────────────────────────────────
 
 func (c *converter) convertPages() {
-	appDir := filepath.Join(c.src, "app")
-	if _, err := os.Stat(appDir); err != nil {
+	c.appDir = filepath.Join(c.src, "app")
+	if _, err := os.Stat(c.appDir); err != nil {
 		// Try src/ directory
-		appDir = filepath.Join(c.src, "src", "app")
-		if _, err := os.Stat(appDir); err != nil {
+		c.appDir = filepath.Join(c.src, "src", "app")
+		if _, err := os.Stat(c.appDir); err != nil {
 			fmt.Println("  No app/ directory found")
 			return
 		}
 	}
 
-	filepath.WalkDir(appDir, func(path string, d os.DirEntry, err error) error {
+	filepath.WalkDir(c.appDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
@@ -137,17 +138,17 @@ func (c *converter) convertPages() {
 		}
 
 		// Skip API routes (handled separately)
-		rel, _ := filepath.Rel(appDir, path)
+		rel, _ := filepath.Rel(c.appDir, path)
 		if strings.HasPrefix(rel, "api/") || strings.HasPrefix(rel, "api\\") {
 			c.collectAPIRoute(path, rel)
 			return nil
 		}
 
-		// Skip non-page/layout files (but warn about components)
+		// Skip non-page/layout files (components handled via inlining)
 		base := strings.TrimSuffix(name, filepath.Ext(name))
 		if base != "page" && base != "layout" && base != "loading" && base != "error" && base != "not-found" {
+			// Components in _components/ are inlined by the import resolver, skip silently
 			if strings.Contains(rel, "_components") || strings.Contains(rel, "_lib") || strings.Contains(rel, "lib/") {
-				c.warnings = append(c.warnings, "Component not auto-converted (inline into layout/pages): "+rel)
 				return nil
 			}
 			c.warnings = append(c.warnings, "Skipped non-page file: "+rel)
@@ -169,6 +170,9 @@ func (c *converter) convertFile(srcPath, relPath string) {
 	content := string(data)
 	original := content
 
+	// Inline local component imports (e.g. from "./_components/AppLayout")
+	content = c.inlineLocalImports(content, srcPath)
+
 	// Strip TypeScript
 	content = stripTypeScript(content)
 
@@ -178,8 +182,11 @@ func (c *converter) convertFile(srcPath, relPath string) {
 	// Convert Next.js patterns
 	content = convertNextPatterns(content)
 
-	// Collapse span-per-token code blocks into single pre/code
-	content = collapseCodeBlocks(content)
+	// Layout-specific transforms (remove <html>/<body> wrapper)
+	base := strings.TrimSuffix(filepath.Base(relPath), filepath.Ext(relPath))
+	if base == "layout" {
+		content = convertLayout(content)
+	}
 
 	// Convert server components (async function with fetch)
 	content, hasLoader := convertServerComponent(content)
@@ -200,6 +207,98 @@ func (c *converter) convertFile(srcPath, relPath string) {
 	fmt.Printf("  %s → %s (%s)\n", relPath, outRel, status)
 }
 
+// inlineLocalImports resolves local imports (e.g. from "./_components/Foo")
+// and inlines the component code directly into the file.
+func (c *converter) inlineLocalImports(content, srcPath string) string {
+	// Match: import { Foo } from "./_components/Foo"
+	// Match: import { Foo, Bar } from "./lib/utils"
+	localImportRe := regexp.MustCompile(`import\s+\{([^}]+)\}\s+from\s+['"](\.[^'"]+)['"];?\n?`)
+	matches := localImportRe.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return content
+	}
+
+	srcDir := filepath.Dir(srcPath)
+	var inlinedCode strings.Builder
+
+	for _, m := range matches {
+		importPath := m[2]
+		// Skip react/next imports (already handled)
+		if !strings.HasPrefix(importPath, ".") {
+			continue
+		}
+
+		// Resolve to actual file path
+		resolved := c.resolveImportPath(srcDir, importPath)
+		if resolved == "" {
+			continue
+		}
+
+		compData, err := os.ReadFile(resolved)
+		if err != nil {
+			continue
+		}
+
+		compContent := string(compData)
+		rel, _ := filepath.Rel(c.appDir, resolved)
+
+		fmt.Printf("  (inlining %s)\n", rel)
+
+		// Strip the component file's own imports, TS, and directives
+		compContent = stripTypeScript(compContent)
+		compContent = regexp.MustCompile(`['"]use (?:client|server)['"];?\n?`).ReplaceAllString(compContent, "")
+		// Remove all import lines from the component (they'll be merged with the parent)
+		compContent = regexp.MustCompile(`(?m)^import\s+.*;\n?`).ReplaceAllString(compContent, "")
+		// Convert Next.js patterns in the component too
+		compContent = convertNextPatterns(compContent)
+		// Remove "export" from the component's function declarations (they'll be local)
+		compContent = regexp.MustCompile(`export\s+function\s+`).ReplaceAllString(compContent, "function ")
+		compContent = regexp.MustCompile(`export\s+const\s+`).ReplaceAllString(compContent, "const ")
+
+		inlinedCode.WriteString("\n// ── Inlined from " + importPath + " ──\n")
+		inlinedCode.WriteString(strings.TrimSpace(compContent))
+		inlinedCode.WriteString("\n\n")
+
+		// Remove the import line from parent
+		content = strings.Replace(content, m[0], "", 1)
+	}
+
+	if inlinedCode.Len() > 0 {
+		// Insert inlined code before the first function/export
+		funcIdx := strings.Index(content, "export default function")
+		if funcIdx < 0 {
+			funcIdx = strings.Index(content, "function ")
+		}
+		if funcIdx > 0 {
+			content = content[:funcIdx] + inlinedCode.String() + content[funcIdx:]
+		} else {
+			content += inlinedCode.String()
+		}
+	}
+
+	return content
+}
+
+// resolveImportPath finds the actual file for a relative import path.
+func (c *converter) resolveImportPath(fromDir, importPath string) string {
+	base := filepath.Join(fromDir, importPath)
+	// Try with extensions
+	for _, ext := range []string{".tsx", ".ts", ".jsx", ".js"} {
+		path := base + ext
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	// Try as directory with index file
+	for _, ext := range []string{".tsx", ".ts", ".jsx", ".js"} {
+		path := filepath.Join(base, "index"+ext)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
 // ── TypeScript stripping ─────────────────────────────
 
 func stripTypeScript(s string) string {
@@ -210,11 +309,15 @@ func stripTypeScript(s string) string {
 	// e.g., (props: PageProps) → (props)
 	s = regexp.MustCompile(`:\s*\w+(?:<[^>]*>)?(\s*[,)])`).ReplaceAllString(s, "$1")
 
+	// Remove complex type annotations on const/let/var declarations
+	// e.g., const colorMap: Record<string, { bg: string }> = { → const colorMap = {
+	s = regexp.MustCompile(`(const|let|var)\s+(\w+)\s*:[^=]+=`).ReplaceAllString(s, "$1 $2 =")
+
 	// Remove interface/type declarations
 	s = regexp.MustCompile(`(?m)^(?:export\s+)?(?:interface|type)\s+\w+[^{]*\{[^}]*\}\n?`).ReplaceAllString(s, "")
 
-	// Remove 'as Type' assertions
-	s = regexp.MustCompile(`\s+as\s+\w+(?:<[^>]*>)?`).ReplaceAllString(s, "")
+	// Remove 'as Type' assertions (but not inside JSX attributes)
+	s = regexp.MustCompile(`\)\s+as\s+\w+(?:<[^>]*>)?`).ReplaceAllString(s, ")")
 
 	// Remove generic type params from functions: <T>(  → (
 	// Only match if preceded by function name/identifier and followed by (
@@ -271,12 +374,18 @@ func convertImports(s string) string {
 
 	// Remove all next/* imports
 	s = regexp.MustCompile(`import\s+\w+\s+from\s+['"]next/\w+['"];?\n?`).ReplaceAllString(s, "")
-	s = regexp.MustCompile(`import\s+\{[^}]+\}\s+from\s+['"]next/\w+['"];?\n?`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`import\s+\{[^}]+\}\s+from\s+['"]next/[\w/]+['"];?\n?`).ReplaceAllString(s, "")
+	// Remove next/font imports (e.g. import { Geist } from "next/font/google")
+	s = regexp.MustCompile(`import\s+\{[^}]+\}\s+from\s+['"]next/font/\w+['"];?\n?`).ReplaceAllString(s, "")
+	// Remove local CSS imports (Lungo uses static/styles.css)
+	s = regexp.MustCompile(`import\s+['"]\.\/globals\.css['"];?\n?`).ReplaceAllString(s, "")
+	// Remove font setup calls (const geistSans = Geist({...}))
+	s = regexp.MustCompile(`(?s)const\s+\w+\s*=\s*(?:Geist|Geist_Mono)\s*\(\{[^}]*\}\);\n?`).ReplaceAllString(s, "")
 
 	// Remove "use client" / "use server" directives
 	s = regexp.MustCompile(`['"]use (?:client|server)['"];?\n?`).ReplaceAllString(s, "")
 
-	// Build Lungo import
+	// Build Lungo import — scan actual usage in the final content
 	lungoImports := []string{"h"}
 	for imp := range reactImports {
 		if imp != "React" && imp != "Fragment" {
@@ -285,6 +394,22 @@ func convertImports(s string) string {
 	}
 	if hasImage && !reactImports["Image"] {
 		lungoImports = append(lungoImports, "Image")
+	}
+	// Auto-detect hooks used by inlined components
+	if strings.Contains(s, "useState(") && !reactImports["useState"] {
+		lungoImports = append(lungoImports, "useState")
+	}
+	if strings.Contains(s, "useRouter(") && !reactImports["useRouter"] {
+		lungoImports = append(lungoImports, "useRouter")
+	}
+	if strings.Contains(s, "useEffect(") && !reactImports["useEffect"] {
+		lungoImports = append(lungoImports, "useEffect")
+	}
+	if strings.Contains(s, "useMemo(") && !reactImports["useMemo"] {
+		lungoImports = append(lungoImports, "useMemo")
+	}
+	if strings.Contains(s, "useRef(") && !reactImports["useRef"] {
+		lungoImports = append(lungoImports, "useRef")
 	}
 
 	// Add Lungo import at the top (after any remaining imports)
@@ -314,8 +439,15 @@ func convertNextPatterns(s string) string {
 	s = regexp.MustCompile(`<Link\b`).ReplaceAllString(s, "<a")
 	s = regexp.MustCompile(`</Link>`).ReplaceAllString(s, "</a>")
 
-	// Remove next/image specific props that don't apply
-	s = regexp.MustCompile(`\s+fill\b`).ReplaceAllString(s, "")
+	// Remove next/image boolean `fill` prop (not SVG fill="value")
+	fillRe := regexp.MustCompile(`\s+fill([=\s/>])`)
+	s = fillRe.ReplaceAllStringFunc(s, func(m string) string {
+		idx := strings.Index(m, "fill") + 4
+		if idx < len(m) && m[idx] == '=' {
+			return m // keep fill="..." (SVG attribute)
+		}
+		return m[idx:] // remove standalone fill, keep trailing char
+	})
 	s = regexp.MustCompile(`\s+sizes="[^"]*"`).ReplaceAllString(s, "")
 	s = regexp.MustCompile(`\s+quality=\{[^}]*\}`).ReplaceAllString(s, "")
 	s = regexp.MustCompile(`\s+placeholder="[^"]*"`).ReplaceAllString(s, "")
@@ -328,93 +460,87 @@ func convertNextPatterns(s string) string {
 	s = regexp.MustCompile(`<Suspense[^>]*>`).ReplaceAllString(s, "")
 	s = strings.ReplaceAll(s, "</Suspense>", "")
 
+	// Convert Next.js <Script> to useEffect-based script loading
+	s = convertScriptComponents(s)
+
+	// Remove TypeScript `declare global` blocks
+	s = regexp.MustCompile(`(?s)declare\s+global\s*\{.*?\}\n\n?`).ReplaceAllString(s, "")
+
 	return s
 }
 
-// ── Code block collapsing ────────────────────────────
-// Converts <pre><code><span>{"text"}</span>...</code></pre>
-// into <pre><code>{`text...`}</code></pre>
+// convertLayout transforms a Next.js RootLayout (wrapping <html><body>) to a Lungo layout.
+// Lungo handles <html>/<body>, so the layout should just export the inner content wrapper.
+func convertLayout(s string) string {
+	// Replace RootLayout → Layout
+	s = strings.Replace(s, "export default function RootLayout", "export default function Layout", 1)
 
-func collapseCodeBlocks(s string) string {
-	// Find blocks of <span className="...">{"text"}</span> inside <pre><code>
-	// and collapse them into a single template literal
+	// Remove <html ...> and </html>
+	s = regexp.MustCompile(`\s*<html[^>]*>\n?`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`\s*</html>\n?`).ReplaceAllString(s, "")
 
-	lines := strings.Split(s, "\n")
-	var result []string
-	i := 0
-	for i < len(lines) {
-		line := lines[i]
-		trimmed := strings.TrimSpace(line)
+	// Remove <body ...> and </body>, keep children
+	s = regexp.MustCompile(`\s*<body[^>]*>\n?`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`\s*</body>\n?`).ReplaceAllString(s, "")
 
-		// Detect start of code block: <pre ...>
-		if strings.Contains(trimmed, "<pre") && i+1 < len(lines) {
-			nextTrimmed := strings.TrimSpace(lines[i+1])
-			if nextTrimmed == "<code>" || strings.HasPrefix(nextTrimmed, "<code>") {
-				// Found <pre>...<code> — collect spans
-				preTag := strings.TrimSpace(line)
-				i += 2 // skip pre and code lines
+	// Remove font variable references in classNames
+	s = regexp.MustCompile(`\$\{geist\w+\.variable\}\s*`).ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, "className={` antialiased`}", "")
 
-				var spans []string
-				hasSpanPattern := false
-				for i < len(lines) {
-					spanLine := strings.TrimSpace(lines[i])
-					if spanLine == "</code>" || strings.HasPrefix(spanLine, "</code>") {
-						i++ // skip </code>
-						// Skip </pre> too
-						if i < len(lines) && strings.TrimSpace(lines[i]) == "</pre>" {
-							i++
-						}
-						break
-					}
-					// Check for span pattern: <span className="...">{"text"}</span>
-					if strings.Contains(spanLine, "<span") && strings.Contains(spanLine, `>{"`) {
-						hasSpanPattern = true
-					}
-					spans = append(spans, lines[i])
-					i++
-				}
-
-				if hasSpanPattern && len(spans) > 0 {
-					// Extract text from spans
-					spanRe := regexp.MustCompile(`<span[^>]*>\{"([^"]*)"\}</span>`)
-					var codeText strings.Builder
-					for _, sl := range spans {
-						matches := spanRe.FindAllStringSubmatch(sl, -1)
-						for _, m := range matches {
-							text := m[1]
-							text = strings.ReplaceAll(text, `\"`, `"`)
-							text = strings.ReplaceAll(text, `\n`, "\n")
-							text = strings.ReplaceAll(text, `\t`, "\t")
-							codeText.WriteString(text)
-						}
-					}
-					code := codeText.String()
-					code = strings.ReplaceAll(code, "`", "\\`")
-					code = strings.ReplaceAll(code, "${", "\\${")
-
-					// Get indentation from original pre line
-					indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-					result = append(result, indent+preTag)
-					result = append(result, indent+"  <code>{`"+code+"`}</code>")
-					result = append(result, indent+"</pre>")
-					continue
-				} else {
-					// Not a span pattern — output as-is
-					result = append(result, line)
-					result = append(result, "                <code>")
-					result = append(result, spans...)
-					continue
-				}
-			}
-		}
-
-		result = append(result, line)
-		i++
+	// Remove unused AnalyticsScript and FacebookPixel references if components were removed
+	if !strings.Contains(s, "function AnalyticsScript") {
+		s = regexp.MustCompile(`\s*<AnalyticsScript\s*/?>.*\n?`).ReplaceAllString(s, "")
 	}
-	return strings.Join(result, "\n")
+	if !strings.Contains(s, "function FacebookPixel") {
+		s = regexp.MustCompile(`\s*<FacebookPixel\s*/?>.*\n?`).ReplaceAllString(s, "")
+	}
+
+	return s
 }
 
 // ── Server component conversion ──────────────────────
+
+// convertScriptComponents converts Next.js <Script> to useEffect-based loading.
+// <Script src={url} strategy="afterInteractive" /> → useEffect script injection
+// <Script id="x">{`code`}</Script> → useEffect with inline eval
+func convertScriptComponents(s string) string {
+	if !strings.Contains(s, "<Script") {
+		return s
+	}
+
+	// Convert <Script src={expr} strategy="afterInteractive" onLoad={...} onError={...} />
+	// to: useEffect that creates a script element
+	srcScriptRe := regexp.MustCompile(`(?s)<Script\s[^>]*src=\{([^}]+)\}[^>]*/>\n?`)
+	s = srcScriptRe.ReplaceAllStringFunc(s, func(m string) string {
+		srcMatch := regexp.MustCompile(`src=\{([^}]+)\}`).FindStringSubmatch(m)
+		if srcMatch == nil {
+			return ""
+		}
+		src := srcMatch[1]
+		return fmt.Sprintf("      {(() => { if (typeof document !== 'undefined') { var s = document.createElement('script'); s.src = %s; s.defer = true; document.head.appendChild(s); } return null; })()}\n", src)
+	})
+
+	// Convert <Script id="x">{`code`}</Script> → inline script via useEffect pattern
+	inlineScriptRe := regexp.MustCompile("(?s)<Script[^>]*>\\s*\\{`([^`]*)`\\}\\s*</Script>\\n?")
+	s = inlineScriptRe.ReplaceAllStringFunc(s, func(m string) string {
+		codeMatch := inlineScriptRe.FindStringSubmatch(m)
+		if codeMatch == nil {
+			return ""
+		}
+		code := strings.TrimSpace(codeMatch[1])
+		// Escape for embedding in a JS string
+		code = strings.ReplaceAll(code, "\\", "\\\\")
+		code = strings.ReplaceAll(code, "'", "\\'")
+		code = strings.ReplaceAll(code, "\n", "\\n")
+		return fmt.Sprintf("      {(() => { if (typeof document !== 'undefined') { try { eval('%s') } catch(e) {} } return null; })()}\n", code)
+	})
+
+	// Remove any remaining <Script> tags that weren't matched
+	s = regexp.MustCompile(`(?s)<Script[^>]*>.*?</Script>\n?`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`<Script[^/]*/>\n?`).ReplaceAllString(s, "")
+
+	return s
+}
 
 func convertServerComponent(s string) (string, bool) {
 	// Check for async function with fetch

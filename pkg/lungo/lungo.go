@@ -41,6 +41,9 @@ type Options struct {
 	// DefaultTheme sets the SSR theme when no cookie is present.
 	// "dark" or "light" (default: "light").
 	DefaultTheme string
+
+	// HeadExtra is raw HTML injected into <head> (e.g. extra <script> or <link> tags).
+	HeadExtra string
 }
 
 // CacheOptions configures page-level HTML caching.

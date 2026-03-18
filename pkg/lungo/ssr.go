@@ -67,6 +67,10 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 		sb.WriteString(fmt.Sprintf("  <meta name=\"description\" content=\"%s\">\n", meta.Description))
 	}
 	sb.WriteString("  <link rel=\"stylesheet\" href=\"/static/styles.css\">\n")
+	if a.opts.HeadExtra != "" {
+		sb.WriteString(a.opts.HeadExtra)
+		sb.WriteString("\n")
+	}
 	sb.WriteString("</head>\n<body>\n")
 
 	sb.WriteString(`<div id="root">`)
