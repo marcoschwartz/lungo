@@ -725,6 +725,13 @@ func compactCodeSpans(s string) string {
 }
 
 func convertServerComponent(s string) (string, bool) {
+	// Always strip async from the default export — Lungo components must be synchronous
+	if strings.Contains(s, "export default async function") {
+		s = regexp.MustCompile(`export\s+default\s+async\s+function`).ReplaceAllString(s, "export default function")
+		// Remove await expressions (keep the expression after await)
+		s = regexp.MustCompile(`\bawait\s+`).ReplaceAllString(s, "")
+	}
+
 	// Check for async function with fetch
 	if !strings.Contains(s, "async") || !strings.Contains(s, "fetch(") {
 		return s, false
