@@ -245,13 +245,18 @@ func convertAttributes(s string) string {
 // convertAttrOutsideStrings replaces attribute/event handler names when they appear
 // as JSX attributes, destructured props, or variable references — not inside strings.
 func convertAttrOutsideStrings(s, from, to string) string {
-	// Match as JSX attribute: preceded by whitespace, followed by = or whitespace or >
+	// For reserved words like "class" and "for", only rename when used as a JSX attribute
+	// (followed by = or : ), not in destructuring ({ className }) or variable references.
+	if to == "class" || to == "for" {
+		// Only match: className= or className: (JSX attribute assignment)
+		re := regexp.MustCompile(from + `([\s]*=)`)
+		s = re.ReplaceAllString(s, to+"${1}")
+		return s
+	}
+	// For non-reserved names, rename in both attributes and destructuring
 	re := regexp.MustCompile(`(\s)` + from + `([\s=>])`)
 	s = re.ReplaceAllString(s, "${1}"+to+"${2}")
-	// Match in destructuring/args — but skip if `to` is a JS reserved word (e.g. "class")
-	if to != "class" && to != "for" {
-		re2 := regexp.MustCompile(`([{,(])(\s*)` + from + `(\s*[,})])`)
-		s = re2.ReplaceAllString(s, "${1}${2}"+to+"${3}")
-	}
+	re2 := regexp.MustCompile(`([{,(])(\s*)` + from + `(\s*[,})])`)
+	s = re2.ReplaceAllString(s, "${1}${2}"+to+"${3}")
 	return s
 }
