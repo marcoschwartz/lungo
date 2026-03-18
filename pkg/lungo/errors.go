@@ -6,6 +6,41 @@ import (
 	"strings"
 )
 
+// renderDevErrorOverlay generates a Next.js-style red error overlay for dev mode.
+func renderDevErrorOverlay(title string, errors []string, filePath string) string {
+	var sb strings.Builder
+	sb.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
+	sb.WriteString("  <meta charset=\"UTF-8\">\n")
+	sb.WriteString("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
+	sb.WriteString("  <title>Build Error</title>\n")
+	sb.WriteString("  <style>\n")
+	sb.WriteString("    * { margin: 0; padding: 0; box-sizing: border-box; }\n")
+	sb.WriteString("    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #eee; }\n")
+	sb.WriteString("    .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; }\n")
+	sb.WriteString("    .card { background: #16213e; border: 1px solid #e94560; border-radius: 12px; padding: 32px; max-width: 640px; width: 100%; box-shadow: 0 25px 50px rgba(233,69,96,0.15); }\n")
+	sb.WriteString("    .badge { display: inline-block; background: #e94560; color: white; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 4px; letter-spacing: 0.5px; margin-bottom: 16px; }\n")
+	sb.WriteString("    h1 { font-size: 20px; font-weight: 700; margin-bottom: 12px; color: #fff; }\n")
+	sb.WriteString("    .file { font-size: 13px; color: #888; margin-bottom: 16px; font-family: monospace; }\n")
+	sb.WriteString("    .error { background: #0f3460; border: 1px solid #e94560; border-radius: 8px; padding: 16px; margin-bottom: 12px; }\n")
+	sb.WriteString("    .error-text { font-family: 'SF Mono', Menlo, monospace; font-size: 14px; color: #ff6b6b; line-height: 1.6; }\n")
+	sb.WriteString("    .hint { font-size: 13px; color: #666; margin-top: 16px; }\n")
+	sb.WriteString("  </style>\n")
+	sb.WriteString("</head>\n<body>\n")
+	sb.WriteString("<div class=\"overlay\"><div class=\"card\">\n")
+	sb.WriteString("  <span class=\"badge\">BUILD ERROR</span>\n")
+	sb.WriteString(fmt.Sprintf("  <h1>%s</h1>\n", title))
+	if filePath != "" {
+		sb.WriteString(fmt.Sprintf("  <div class=\"file\">%s</div>\n", filePath))
+	}
+	for _, e := range errors {
+		sb.WriteString(fmt.Sprintf("  <div class=\"error\"><div class=\"error-text\">%s</div></div>\n", e))
+	}
+	sb.WriteString("  <div class=\"hint\">Fix the error and the page will auto-refresh.</div>\n")
+	sb.WriteString("</div></div>\n")
+	sb.WriteString("</body>\n</html>")
+	return sb.String()
+}
+
 // serveNotFound renders a custom not-found.js page if it exists, otherwise a default 404.
 func (a *App) serveNotFound(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotFound)

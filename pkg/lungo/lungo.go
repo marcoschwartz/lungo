@@ -377,7 +377,18 @@ func (a *App) serveAppFile(w http.ResponseWriter, r *http.Request, name string) 
 	}
 
 	if needsTranspile {
-		data = []byte(TranspileJSX(string(data)))
+		result, jsxErrors := TranspileJSXWithErrors(string(data))
+		if len(jsxErrors) > 0 && a.opts.Dev {
+			log.Printf("[Lungo] JSX errors in %s:", name)
+			for _, e := range jsxErrors {
+				log.Printf("  - %s", e)
+			}
+			// Inject console.error so the browser shows the error
+			errorJS := "console.error('[Lungo JSX Error] " + strings.ReplaceAll(jsxErrors[0], "'", "\\'") + "');\n"
+			data = []byte(errorJS + result)
+		} else {
+			data = []byte(result)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/javascript")

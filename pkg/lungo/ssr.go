@@ -72,6 +72,12 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	sb.WriteString(`<div id="root">`)
 	ssrHTML, _, ssrErr := a.evaluatePageSSR(route.PagePath, loaderData, route.Segments)
 	hasSSR := ssrErr == nil && ssrHTML != ""
+
+	// Dev mode: show error overlay for JSX/SSR errors
+	if ssrErr != nil && a.opts.Dev && strings.Contains(ssrErr.Error(), "JSX error") {
+		return renderDevErrorOverlay("JSX Error", []string{ssrErr.Error()}, route.PagePath)
+	}
+
 	var layoutDataMap map[string]json.RawMessage
 	if hasSSR {
 		ssrHTML, layoutDataMap = a.wrapInLayoutsWithData(ssrHTML, route, isDark, r)

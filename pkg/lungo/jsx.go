@@ -11,17 +11,23 @@ import (
 // Input:  <div className="foo"><Button onClick={handler}>text</Button></div>
 // Output: h("div", {class: "foo"}, h(Button, {onclick: handler}, "text"))
 func TranspileJSX(source string) string {
-	// Step 1: Next.js / React compatibility transforms
+	result, _ := TranspileJSXWithErrors(source)
+	return result
+}
+
+// TranspileJSXWithErrors converts JSX to h() calls and returns any errors found.
+func TranspileJSXWithErrors(source string) (string, []string) {
 	source = NextCompat(source)
-	// Step 2: JSX → h() calls
 	t := &jsxTranspiler{src: source, pos: 0}
-	return t.transpile()
+	result := t.transpile()
+	return result, t.errors
 }
 
 type jsxTranspiler struct {
 	src        string
 	pos        int
-	preDepth   int // tracks nesting inside <pre>/<textarea> for whitespace preservation
+	preDepth   int      // tracks nesting inside <pre>/<textarea> for whitespace preservation
+	errors     []string // JSX parsing errors (tag mismatches, etc.)
 }
 
 func (t *jsxTranspiler) transpile() string {
@@ -218,8 +224,11 @@ func (t *jsxTranspiler) parseAttrName() string {
 
 func (t *jsxTranspiler) parseJSXChildren(closeTag string, preserveWhitespace bool) []string {
 	var children []string
+	maxIter := len(t.src) // safety limit
 
-	for t.pos < len(t.src) {
+	for t.pos < len(t.src) && maxIter > 0 {
+		maxIter--
+
 		// Check for closing tag
 		if strings.HasPrefix(t.src[t.pos:], closeTag) {
 			t.pos += len(closeTag)
@@ -230,6 +239,25 @@ func (t *jsxTranspiler) parseJSXChildren(closeTag string, preserveWhitespace boo
 		if strings.HasPrefix(t.src[t.pos:], "</>") {
 			t.pos += 3
 			break
+		}
+
+		// Check for MISMATCHED closing tag: </something> that doesn't match
+		if t.pos+2 < len(t.src) && t.src[t.pos] == '<' && t.src[t.pos+1] == '/' {
+			// Extract the closing tag name
+			endTagStart := t.pos + 2
+			endTagEnd := endTagStart
+			for endTagEnd < len(t.src) && t.src[endTagEnd] != '>' {
+				endTagEnd++
+			}
+			if endTagEnd < len(t.src) {
+				foundClose := "</" + t.src[endTagStart:endTagEnd] + ">"
+				if foundClose != closeTag {
+					// Mismatch! Log error and consume the wrong close tag
+					t.errors = append(t.errors, "JSX tag mismatch: expected "+closeTag+" but found "+foundClose)
+					t.pos = endTagEnd + 1
+					break
+				}
+			}
 		}
 
 		ch := t.src[t.pos]

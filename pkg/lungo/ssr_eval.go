@@ -3,6 +3,7 @@ package lungo
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -50,7 +51,16 @@ func (a *App) getPageCache(pagePath string) (*ssrPageCache, error) {
 	hookCount := strings.Count(rawSource, "useState")
 	isInteractive := hookCount > 3
 
-	source := TranspileJSX(rawSource)
+	source, jsxErrors := TranspileJSXWithErrors(rawSource)
+	if len(jsxErrors) > 0 {
+		log.Printf("[Lungo] JSX errors in %s:", pagePath)
+		for _, e := range jsxErrors {
+			log.Printf("  - %s", e)
+		}
+		if a.opts.Dev {
+			return nil, fmt.Errorf("JSX error in %s: %s", pagePath, jsxErrors[0])
+		}
+	}
 
 	funcBody, funcParams, err := espresso.ExtractDefaultExport(source)
 	if err != nil {
