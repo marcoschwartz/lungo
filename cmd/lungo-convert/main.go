@@ -330,6 +330,16 @@ func stripTypeScript(s string) string {
 	// Remove React.FC, React.ReactNode etc.
 	s = regexp.MustCompile(`:\s*React\.\w+`).ReplaceAllString(s, "")
 
+	// Remove destructured param type annotations: { x }: { x: Type } → { x }
+	// Handles ({ children }: { children: React.ReactNode }) → ({ children })
+	s = regexp.MustCompile(`\}\s*:\s*\{[^}]*\}`).ReplaceAllString(s, "}")
+
+	// Remove type annotations on destructured params with defaults: }: TypeName = {
+	s = regexp.MustCompile(`\}\s*:\s*\w+\s*=`).ReplaceAllString(s, "} =")
+
+	// Remove optional param markers: param? → param
+	s = regexp.MustCompile(`(\w)\?(\s*[,)=])`).ReplaceAllString(s, "$1$2")
+
 	return s
 }
 

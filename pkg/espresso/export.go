@@ -177,6 +177,61 @@ func ExtractFunctions(source string) map[string]*Value {
 	return funcs
 }
 
+// ExtractTopLevelVars finds top-level const/let/var declarations (not inside functions)
+// and evaluates them, returning name→Value pairs.
+func ExtractTopLevelVars(source string, scope map[string]*Value) {
+	// Find const/let/var at the start of a line (top level)
+	lines := strings.Split(source, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		// Skip exports, functions, comments
+		if line == "" || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "/*") {
+			continue
+		}
+		if strings.HasPrefix(line, "export default") || strings.HasPrefix(line, "export const metadata") {
+			continue
+		}
+		if strings.HasPrefix(line, "function ") || strings.HasPrefix(line, "export function") {
+			// Skip function body
+			depth := strings.Count(line, "{") - strings.Count(line, "}")
+			for depth > 0 && i+1 < len(lines) {
+				i++
+				depth += strings.Count(lines[i], "{") - strings.Count(lines[i], "}")
+			}
+			continue
+		}
+
+		isDecl := false
+		for _, kw := range []string{"const ", "let ", "var "} {
+			if strings.HasPrefix(line, kw) {
+				isDecl = true
+				break
+			}
+		}
+		if !isDecl {
+			continue
+		}
+
+		// Collect the full statement (may span multiple lines)
+		stmt := line
+		depth := strings.Count(stmt, "[") - strings.Count(stmt, "]") +
+			strings.Count(stmt, "{") - strings.Count(stmt, "}") +
+			strings.Count(stmt, "(") - strings.Count(stmt, ")")
+		for depth > 0 && i+1 < len(lines) {
+			i++
+			stmt += "\n" + lines[i]
+			depth += strings.Count(lines[i], "[") - strings.Count(lines[i], "]") +
+				strings.Count(lines[i], "{") - strings.Count(lines[i], "}") +
+				strings.Count(lines[i], "(") - strings.Count(lines[i], ")")
+		}
+
+		// Evaluate the declaration in the given scope
+		tokens := tokenizeCached(stmt)
+		ev := &evaluator{tokens: tokens, pos: 0, scope: scope}
+		ev.evalStatements()
+	}
+}
+
 // CallFunc calls a function value with the given props.
 func CallFunc(scope map[string]*Value, fn *Value, props map[string]*Value) *Value {
 	if fn == nil {

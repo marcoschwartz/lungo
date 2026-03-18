@@ -70,12 +70,17 @@ func (a *App) getPageCache(pagePath string) (*ssrPageCache, error) {
 	localFuncs := espresso.ExtractFunctions(source)
 	tokens := espresso.Tokenize(funcBody)
 
+	// Extract top-level const/let/var declarations (e.g. navLinks, colorMap)
+	topLevelVars := make(map[string]*espresso.Value)
+	espresso.ExtractTopLevelVars(source, topLevelVars)
+
 	entry := &ssrPageCache{
-		funcBody:    funcBody,
-		funcParams:  funcParams,
-		localFuncs:  localFuncs,
-		tokens:      tokens,
-		interactive: isInteractive,
+		funcBody:     funcBody,
+		funcParams:   funcParams,
+		localFuncs:   localFuncs,
+		tokens:       tokens,
+		interactive:  isInteractive,
+		topLevelVars: topLevelVars,
 	}
 
 	if !a.opts.Dev {
@@ -95,6 +100,11 @@ func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, param
 	}
 
 	scope := buildSSRScope(cached.localFuncs)
+
+	// Inject top-level vars (const navLinks = [...], etc.)
+	for k, v := range cached.topLevelVars {
+		scope[k] = v
+	}
 
 	if loaderData != nil {
 		scope["data"] = espresso.JsonToValue(loaderData)
@@ -213,6 +223,11 @@ func (a *App) evaluateLayoutWithData(layoutPath string, childrenHTML string, isD
 
 	scope := buildSSRScope(cached.localFuncs)
 	stubHooksInScope(scope, urlPath)
+
+	// Inject top-level vars (const navLinks = [...], etc.)
+	for k, v := range cached.topLevelVars {
+		scope[k] = v
+	}
 
 	// Override getInitialTheme for dark mode
 	if isDark {

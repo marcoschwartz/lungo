@@ -230,11 +230,12 @@ type ssrNode struct {
 
 // ssrPageCache caches transpiled + parsed page data.
 type ssrPageCache struct {
-	funcBody   string
-	funcParams string
-	localFuncs map[string]*espresso.Value
-	tokens     []espresso.Tok
-	interactive bool
+	funcBody     string
+	funcParams   string
+	localFuncs   map[string]*espresso.Value
+	topLevelVars map[string]*espresso.Value
+	tokens       []espresso.Tok
+	interactive  bool
 }
 
 // extractMetadataFromSource extracts title/description from page source.
