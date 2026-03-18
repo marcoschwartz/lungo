@@ -182,6 +182,13 @@ func (c *converter) convertFile(srcPath, relPath string) {
 	// Convert Next.js patterns
 	content = convertNextPatterns(content)
 
+	// Strip inter-span whitespace inside <pre><code> blocks
+	content = compactCodeSpans(content)
+
+	// Replace HTML entities that JSX would decode
+	content = strings.ReplaceAll(content, "&apos;", "'")
+	content = strings.ReplaceAll(content, "&quot;", `"`)
+
 	// Layout-specific transforms (remove <html>/<body> wrapper)
 	base := strings.TrimSuffix(filepath.Base(relPath), filepath.Ext(relPath))
 	if base == "layout" {
@@ -558,6 +565,55 @@ func convertScriptComponents(s string) string {
 	s = regexp.MustCompile(`<Script[^/]*/>\n?`).ReplaceAllString(s, "")
 
 	return s
+}
+
+// compactCodeSpans removes whitespace between <span> elements inside <pre><code> blocks.
+// The original source has each span on a separate indented line, which renders as visible
+// whitespace inside <pre>. This collapses them onto one line.
+func compactCodeSpans(s string) string {
+	lines := strings.Split(s, "\n")
+	var result []string
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Detect <code> followed by span lines
+		if (trimmed == "<code>" || strings.HasPrefix(trimmed, "<code>")) && !strings.Contains(trimmed, "</code>") {
+			// Check if next lines are spans
+			j := i + 1
+			hasSpans := false
+			for j < len(lines) {
+				t := strings.TrimSpace(lines[j])
+				if t == "</code>" || strings.HasPrefix(t, "</code>") {
+					break
+				}
+				if strings.HasPrefix(t, "<span") {
+					hasSpans = true
+				}
+				j++
+			}
+
+			if hasSpans && j < len(lines) {
+				// Collect indent from the <code> line
+				indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+				// Compact: join all spans without inter-line whitespace
+				var compacted strings.Builder
+				compacted.WriteString(indent + "<code>")
+				for k := i + 1; k < j; k++ {
+					compacted.WriteString(strings.TrimSpace(lines[k]))
+				}
+				compacted.WriteString("</code>")
+				result = append(result, compacted.String())
+				i = j + 1 // skip past </code>
+				continue
+			}
+		}
+
+		result = append(result, line)
+		i++
+	}
+	return strings.Join(result, "\n")
 }
 
 func convertServerComponent(s string) (string, bool) {
