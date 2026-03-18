@@ -589,6 +589,8 @@
     }
     newVNode._dom = dom;
     setProps(dom, oldVNode.props, newVNode.props);
+    // Skip child diffing for dangerouslySetInnerHTML — innerHTML was already set by setProps
+    if (newVNode.props.dangerouslySetInnerHTML != null) return;
     diffChildren(dom, oldVNode.children, newVNode.children);
   }
 
@@ -666,7 +668,7 @@
     } else if (key === "className" || key === "class") {
       dom.setAttribute("class", value || "");
     } else if (key === "dangerouslySetInnerHTML") {
-      dom.innerHTML = value.__html || "";
+      dom.innerHTML = typeof value === "string" ? value : (value && value.__html) || "";
     } else if (!isSVG && (key === "value" || key === "checked" || key === "selected" || key === "disabled")) {
       dom[key] = value ?? "";
     } else if (isSVG) {
@@ -750,6 +752,13 @@
     }
 
     vnode._dom = dom;
+
+    // dangerouslySetInnerHTML — skip child hydration, SSR HTML is already correct
+    if (vnode.props.dangerouslySetInnerHTML != null) {
+      setProps(dom, EMPTY_OBJ, vnode.props);
+      return;
+    }
+
     setProps(dom, EMPTY_OBJ, vnode.props);
 
     // Set refs during hydration (setProps skips them)
