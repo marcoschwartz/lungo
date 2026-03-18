@@ -313,18 +313,21 @@ func stripTypeScript(s string) string {
 	s = regexp.MustCompile(`import\s+type\s+\{[^}]*\}\s+from\s+['"][^'"]+['"];?\n?`).ReplaceAllString(s, "")
 
 	// Remove : Type annotations from function params
-	// e.g., (props: PageProps) → (props)
-	s = regexp.MustCompile(`:\s*\w+(?:<[^>]*>)?(\s*[,)])`).ReplaceAllString(s, "$1")
+	// e.g., (props: PageProps) → (props), (val: number | string) → (val)
+	// Handle union types: `: Type1 | Type2 | Type3`
+	s = regexp.MustCompile(`:\s*\w+(?:<[^>]*>)?(?:\s*\|\s*\w+(?:<[^>]*>)?)*(\s*[,)])`).ReplaceAllString(s, "$1")
 
 	// Remove complex type annotations on const/let/var declarations
 	// e.g., const colorMap: Record<string, { bg: string }> = { → const colorMap = {
 	s = regexp.MustCompile(`(const|let|var)\s+(\w+)\s*:[^=]+=`).ReplaceAllString(s, "$1 $2 =")
 
-	// Remove interface/type declarations
-	s = regexp.MustCompile(`(?m)^(?:export\s+)?(?:interface|type)\s+\w+[^{]*\{[^}]*\}\n?`).ReplaceAllString(s, "")
+	// Remove interface/type declarations (including nested braces)
+	s = stripInterfacesAndTypes(s)
 
-	// Remove 'as Type' assertions (but not inside JSX attributes)
-	s = regexp.MustCompile(`\)\s+as\s+\w+(?:<[^>]*>)?`).ReplaceAllString(s, ")")
+	// Remove 'as Type' assertions — handle both `as Word` and `as { ... }`
+	// Match: expr as { ... } and expr as Word<...>
+	s = regexp.MustCompile(`\s+as\s+\{[^}]*\}`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`\s+as\s+\w+(?:<[^>]*>)?`).ReplaceAllString(s, "")
 
 	// Remove generic type params from functions: <T>(  → (
 	// Only match if preceded by function name/identifier and followed by (
@@ -333,6 +336,9 @@ func stripTypeScript(s string) string {
 		re := regexp.MustCompile(`(\w)\s*<\w+(?:\s+extends\s+[^>]+)?>\s*\(`)
 		return re.ReplaceAllString(m, "$1(")
 	})
+
+	// Remove function return type annotations: ): Type {  → ) {
+	s = regexp.MustCompile(`\)\s*:\s*\w+(?:<[^>]*>)?\s*\{`).ReplaceAllString(s, ") {")
 
 	// Remove React.FC, React.ReactNode etc.
 	s = regexp.MustCompile(`:\s*React\.\w+`).ReplaceAllString(s, "")
@@ -347,6 +353,60 @@ func stripTypeScript(s string) string {
 	// Remove optional param markers: param? → param
 	s = regexp.MustCompile(`(\w)\?(\s*[,)=])`).ReplaceAllString(s, "$1$2")
 
+	return s
+}
+
+// stripInterfacesAndTypes removes interface and type declarations, handling nested braces.
+func stripInterfacesAndTypes(s string) string {
+	re := regexp.MustCompile(`(?m)^(?:export\s+)?(?:interface|type)\s+\w+`)
+	for {
+		loc := re.FindStringIndex(s)
+		if loc == nil {
+			break
+		}
+		// Find the opening brace
+		braceIdx := strings.Index(s[loc[0]:], "{")
+		if braceIdx < 0 {
+			// type alias without braces: type Foo = string | number;
+			semiIdx := strings.Index(s[loc[0]:], ";")
+			if semiIdx >= 0 {
+				end := loc[0] + semiIdx + 1
+				if end < len(s) && s[end] == '\n' {
+					end++
+				}
+				s = s[:loc[0]] + s[end:]
+			} else {
+				nlIdx := strings.Index(s[loc[0]:], "\n")
+				if nlIdx >= 0 {
+					s = s[:loc[0]] + s[loc[0]+nlIdx+1:]
+				} else {
+					s = s[:loc[0]]
+				}
+			}
+			continue
+		}
+		// Match nested braces
+		start := loc[0] + braceIdx
+		depth := 0
+		end := start
+		for end < len(s) {
+			if s[end] == '{' {
+				depth++
+			} else if s[end] == '}' {
+				depth--
+				if depth == 0 {
+					end++
+					break
+				}
+			}
+			end++
+		}
+		// Skip trailing newline
+		if end < len(s) && s[end] == '\n' {
+			end++
+		}
+		s = s[:loc[0]] + s[end:]
+	}
 	return s
 }
 
@@ -519,6 +579,26 @@ func convertLayout(s string) string {
 	if !strings.Contains(s, "function FacebookPixel") {
 		s = regexp.MustCompile(`\s*<FacebookPixel\s*/?>.*\n?`).ReplaceAllString(s, "")
 	}
+
+	// If the default Layout function returns multiple sibling elements,
+	// wrap in a fragment. Detect by checking if there are JSX elements
+	// after the first closing tag inside the return().
+	// Simpler approach: find the Layout's return and wrap content in <>...</>
+	layoutReturnRe := regexp.MustCompile(`(?s)(export default function Layout\([^)]*\)\s*\{\s*return\s*\()(.+?)(\);\s*\})`)
+	s = layoutReturnRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := layoutReturnRe.FindStringSubmatch(m)
+		if parts == nil {
+			return m
+		}
+		body := strings.TrimSpace(parts[2])
+		// Check if body has multiple root elements (not already wrapped in fragment)
+		if !strings.HasPrefix(body, "<>") && !strings.HasPrefix(body, "<div") {
+			// Count root-level elements — if there's content after the first element's closing tag
+			// Just wrap in fragment to be safe
+			body = "<>\n        " + body + "\n      </>"
+		}
+		return parts[1] + body + parts[3]
+	})
 
 	return s
 }
