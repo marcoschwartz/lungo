@@ -540,8 +540,36 @@ func convertNextPatterns(s string) string {
 	// Convert Next.js <Script> to useEffect-based script loading
 	s = convertScriptComponents(s)
 
-	// Remove TypeScript `declare global` blocks
-	s = regexp.MustCompile(`(?s)declare\s+global\s*\{.*?\}\n\n?`).ReplaceAllString(s, "")
+	// Remove TypeScript `declare global` blocks (with nested braces)
+	for {
+		idx := strings.Index(s, "declare global")
+		if idx < 0 {
+			break
+		}
+		braceStart := strings.Index(s[idx:], "{")
+		if braceStart < 0 {
+			break
+		}
+		braceStart += idx
+		depth := 0
+		end := braceStart
+		for end < len(s) {
+			if s[end] == '{' {
+				depth++
+			} else if s[end] == '}' {
+				depth--
+				if depth == 0 {
+					end++
+					break
+				}
+			}
+			end++
+		}
+		for end < len(s) && (s[end] == '\n' || s[end] == '\r') {
+			end++
+		}
+		s = s[:idx] + s[end:]
+	}
 
 	// Convert process.env.NEXT_PUBLIC_X → (window.__ENV && window.__ENV.X) || ""
 	// Strip NEXT_PUBLIC_ prefix from the env var name
