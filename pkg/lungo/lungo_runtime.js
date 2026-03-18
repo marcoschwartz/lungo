@@ -453,6 +453,10 @@
   }
 
   function createDom(vnode, parentDom) {
+    if (!vnode || typeof vnode !== "object") {
+      return document.createTextNode(vnode == null ? "" : String(vnode));
+    }
+
     if (vnode.tag === TEXT_NODE) {
       const dom = document.createTextNode(vnode._text);
       vnode._dom = dom;
@@ -461,9 +465,10 @@
 
     // Component
     if (typeof vnode.tag === "function") {
-      const props = vnode.children.length > 0
-        ? Object.assign({}, vnode.props, { children: vnode.children })
-        : vnode.props;
+      const children = vnode.children || [];
+      const props = children.length > 0
+        ? Object.assign({}, vnode.props, { children: children })
+        : (vnode.props || {});
       const inst = createInstance(vnode.tag, props);
       currentInstance = inst;
       hookIndex = 0;
@@ -497,9 +502,11 @@
       props.ref.current = dom;
     }
 
-    for (const child of vnode.children) {
-      const childDom = createDom(child, dom);
-      dom.appendChild(childDom);
+    if (vnode.children) {
+      for (const child of vnode.children) {
+        const childDom = createDom(child, dom);
+        if (childDom) dom.appendChild(childDom);
+      }
     }
     return dom;
   }
