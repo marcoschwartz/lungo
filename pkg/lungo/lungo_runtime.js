@@ -705,7 +705,8 @@
   }
 
   function hydrateNode(vnode, dom, parentDom) {
-    if (!vnode) return;
+    if (!vnode || typeof vnode !== "object") return;
+    if (!vnode.tag && vnode.tag !== null) return;
 
     // Text node
     if (vnode.tag === TEXT_NODE) {
@@ -747,9 +748,10 @@
         parentDom.appendChild(newDom);
         return;
       }
-      const props = vnode.children.length > 0
-        ? Object.assign({}, vnode.props, { children: vnode.children })
-        : vnode.props;
+      const hChildren = vnode.children || [];
+      const props = hChildren.length > 0
+        ? Object.assign({}, vnode.props || {}, { children: hChildren })
+        : (vnode.props || {});
       const inst = createInstance(vnode.tag, props);
       currentInstance = inst;
       hookIndex = 0;
@@ -774,7 +776,7 @@
     }
 
     // Element — check tag match
-    if (dom.nodeType !== 1 || dom.tagName.toLowerCase() !== vnode.tag.toLowerCase()) {
+    if (!vnode.tag || dom.nodeType !== 1 || dom.tagName.toLowerCase() !== vnode.tag.toLowerCase()) {
       // Mismatch — replace this node only (don't destroy entire tree)
       if (window.__LUNGO_DEV__) {
         console.warn("[Lungo] Hydration mismatch at <" + vnode.tag + ">: SSR has <" + (dom.tagName || "text").toLowerCase() + ">, patching in-place");
