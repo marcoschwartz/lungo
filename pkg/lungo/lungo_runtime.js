@@ -1143,34 +1143,15 @@
             } catch (_) {}
           }
 
-          // Also try to import the page module for client-side interactivity
-          let PageComponent = null;
-          try {
-            const mod = pageModuleCache.get(matched.pagePath)
-              || await import(matched.pagePath).then(m => { pageModuleCache.set(matched.pagePath, m); return m; });
-            PageComponent = mod.default;
-          } catch (_) {
-            // Module import failed — use server-rendered HTML via a wrapper component
-          }
-
-          if (PageComponent) {
-            // Interactive page — use the component directly
-            setView({
-              Page: PageComponent,
-              data: pageData.data || {},
-              params: matchedParams,
-              error: null,
-            });
-          } else {
-            // Server-only page — inject server-rendered HTML
-            const ServerPage = () => h("div", { dangerouslySetInnerHTML: { __html: pageData.html } });
-            setView({
-              Page: ServerPage,
-              data: pageData.data || {},
-              params: matchedParams,
-              error: null,
-            });
-          }
+          // Use server-rendered HTML (like Next.js RSC)
+          // The server already rendered the page — just inject the HTML
+          const ServerPage = () => h("div", { dangerouslySetInnerHTML: { __html: pageData.html } });
+          setView({
+            Page: ServerPage,
+            data: pageData.data || {},
+            params: matchedParams,
+            error: null,
+          });
 
           // Restore or reset scroll after render
           if (!isRefresh) requestAnimationFrame(() => restoreScroll(router.pathname));
