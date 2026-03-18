@@ -588,6 +588,19 @@ func convertLayout(s string) string {
 	// Replace RootLayout → Layout
 	s = strings.Replace(s, "export default function RootLayout", "export default function Layout", 1)
 
+	// If the default Layout just wraps an inlined component (e.g. AppLayout),
+	// promote that component to be the default Layout directly and remove the wrapper.
+	// This avoids the indirection that breaks Lungo's client-side navigation.
+	wrapperRe := regexp.MustCompile(`export default function Layout\([^)]*\)\s*\{[^}]*return\s*\(?<?>\s*<(\w+)>\s*\{?\s*children\s*\}?\s*</\w+>[\s\S]*?</?>\s*\)?\s*;\s*\}`)
+	if m := wrapperRe.FindStringSubmatch(s); m != nil {
+		wrappedName := m[1] // e.g. "AppLayout"
+		// Rename the inlined component to Layout and remove the old default export
+		s = strings.Replace(s, "function "+wrappedName+"(", "export default function Layout(", 1)
+		s = wrapperRe.ReplaceAllString(s, "")
+		// Remove any components that were siblings in the fragment (AnalyticsScript, FacebookPixel)
+		// They're already defined as functions but won't be called
+	}
+
 	// Remove <html ...> and </html>
 	s = regexp.MustCompile(`\s*<html[^>]*>\n?`).ReplaceAllString(s, "")
 	s = regexp.MustCompile(`\s*</html>\n?`).ReplaceAllString(s, "")
