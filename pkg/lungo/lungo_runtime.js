@@ -489,11 +489,12 @@
       ? document.createElementNS(SVG_NS, vnode.tag)
       : document.createElement(vnode.tag);
     vnode._dom = dom;
-    setProps(dom, EMPTY_OBJ, vnode.props, isSVG);
+    const props = vnode.props || EMPTY_OBJ;
+    setProps(dom, EMPTY_OBJ, props, isSVG);
 
     // Handle ref
-    if (vnode.props.ref && typeof vnode.props.ref === "object") {
-      vnode.props.ref.current = dom;
+    if (props.ref && typeof props.ref === "object") {
+      props.ref.current = dom;
     }
 
     for (const child of vnode.children) {
@@ -778,18 +779,19 @@
 
     // Tag matches — reuse DOM node
     vnode._dom = dom;
+    const hProps = vnode.props || EMPTY_OBJ;
 
     // dangerouslySetInnerHTML — skip child hydration, SSR HTML is already correct
-    if (vnode.props.dangerouslySetInnerHTML != null) {
-      setProps(dom, EMPTY_OBJ, vnode.props);
+    if (hProps.dangerouslySetInnerHTML != null) {
+      setProps(dom, EMPTY_OBJ, hProps);
       return;
     }
 
-    setProps(dom, EMPTY_OBJ, vnode.props);
+    setProps(dom, EMPTY_OBJ, hProps);
 
     // Set refs
-    if (vnode.props.ref && typeof vnode.props.ref === "object") {
-      vnode.props.ref.current = dom;
+    if (hProps.ref && typeof hProps.ref === "object") {
+      hProps.ref.current = dom;
     }
 
     // Hydrate children — resilient matching
