@@ -476,6 +476,14 @@ func convertNextPatterns(s string) string {
 	// Remove TypeScript `declare global` blocks
 	s = regexp.MustCompile(`(?s)declare\s+global\s*\{.*?\}\n\n?`).ReplaceAllString(s, "")
 
+	// Convert process.env.NEXT_PUBLIC_X → (window.__ENV && window.__ENV.X) || ""
+	// Strip NEXT_PUBLIC_ prefix from the env var name
+	s = regexp.MustCompile(`process\.env\.NEXT_PUBLIC_(\w+)`).ReplaceAllString(s, `(window.__ENV && window.__ENV.$1 || "")`)
+	// Also handle process.env.NODE_ENV
+	s = strings.ReplaceAll(s, `process.env.NODE_ENV`, `"production"`)
+	// Any remaining process.env.X
+	s = regexp.MustCompile(`process\.env\.(\w+)`).ReplaceAllString(s, `(window.__ENV && window.__ENV.$1 || "")`)
+
 	return s
 }
 
