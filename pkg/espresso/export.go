@@ -182,13 +182,10 @@ func CallFunc(scope map[string]*Value, fn *Value, props map[string]*Value) *Valu
 	if fn == nil {
 		return Undefined
 	}
-	// Handle native Go functions
+	// Handle native Go functions — pass props as single object arg
 	if fn.native != nil {
-		var args []*Value
-		for _, v := range props {
-			args = append(args, v)
-		}
-		return fn.native(args)
+		propsObj := NewObj(props)
+		return fn.native([]*Value{propsObj})
 	}
 	// Handle arrow functions
 	if fn.str == "__arrow" {
