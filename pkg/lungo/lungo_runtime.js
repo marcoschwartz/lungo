@@ -402,7 +402,17 @@
     const updates = Array.from(pendingUpdates);
     pendingUpdates.clear();
     for (const inst of updates) {
-      if (inst.__dom && inst.__dom.parentNode) {
+      // Find the DOM node — may be detached after hydration patches
+      let parentDom = inst.__parentDom;
+      let dom = inst.__dom;
+      if (!dom || !dom.parentNode) {
+        // Try to find the instance's DOM via parent
+        if (parentDom && parentDom.firstChild) {
+          dom = parentDom.firstChild;
+          inst.__dom = dom;
+        }
+      }
+      if (dom) {
         const oldVNode = inst.__vnode;
         currentInstance = inst;
         hookIndex = 0;
@@ -410,7 +420,7 @@
         runEffects(inst);
         inst.__vnode = newVNode;
         currentInstance = null;
-        patch(inst.__parentDom, oldVNode, newVNode, inst.__dom);
+        patch(parentDom || dom.parentNode, oldVNode, newVNode, dom);
         // Update dom reference if changed
         const newDom = getDom(newVNode);
         if (newDom && newDom !== inst.__dom) {
