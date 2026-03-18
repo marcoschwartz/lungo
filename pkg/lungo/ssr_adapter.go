@@ -246,3 +246,5 @@ type pageMetadata struct {
 	Title       string
 	Description string
 }
+
+func min2(a, b int) int { if a < b { return a }; return b }
