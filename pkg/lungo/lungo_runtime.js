@@ -695,7 +695,7 @@
       container.__vnode = vnode;
     } catch (e) {
       // Hydration mismatch — fall back to full client render (same as React/Next.js)
-      console.warn("[Lungo] Hydration mismatch, falling back to client render:", e.message);
+      console.warn("[Lungo] Hydration mismatch, falling back to client render:", e.message, "\n  Stack:", e.stack?.split("\n").slice(1,3).join("\n  "));
       render(vnode, container);
     }
   }
