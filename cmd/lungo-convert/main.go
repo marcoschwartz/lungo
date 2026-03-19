@@ -839,6 +839,40 @@ func convertServerComponent(s string) (string, bool) {
 	// Add { data } param to the default export if not already present
 	s = regexp.MustCompile(`export default function (\w+)\(\)`).ReplaceAllString(s, "export default function $1({ data })")
 
+	// Replace fetch/processing code in the function body with data access
+	// Find the body between "export default function ...({data}) {" and "return ("
+	// Replace any getProducts/getContent/fetch calls with data-based access
+	funcBodyRe := regexp.MustCompile(`(?s)(export default function \w+\(\{ data \}\)\s*\{)\s*(.+?)(return\s*\()`)
+	s = funcBodyRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := funcBodyRe.FindStringSubmatch(m)
+		if parts == nil {
+			return m
+		}
+		funcStart := parts[1]
+		body := parts[2]
+		returnStart := parts[3]
+
+		// Check if body has fetch/async patterns that should be replaced
+		if strings.Contains(body, "getProducts") || strings.Contains(body, "getContent") ||
+			strings.Contains(body, "Promise.all") || strings.Contains(body, "fetch(") {
+			// Replace with simple data extraction
+			pageName := "data"
+			nameRe := regexp.MustCompile(`function (\w+)\(`)
+			if nm := nameRe.FindStringSubmatch(funcStart); nm != nil {
+				pageName = strings.ToLower(strings.TrimSuffix(nm[1], "Page"))
+			}
+
+			var newBody string
+			if strings.Contains(body, "productsWithFeatures") || strings.Contains(body, "getProducts") {
+				newBody = "\n  const productsWithFeatures = data && data.products ? data.products : [];\n  const hasProducts = productsWithFeatures.length > 0;\n\n  "
+			} else {
+				newBody = fmt.Sprintf("\n  const %s = data || {};\n\n  ", pageName)
+			}
+			return funcStart + newBody + returnStart
+		}
+		return m
+	})
+
 	if len(fetchURLs) == 0 {
 		// Complex case: fetch URLs are dynamic (variables, template literals)
 		// Generate a loader with /api/<pagename> and a TODO comment
