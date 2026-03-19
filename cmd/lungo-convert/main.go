@@ -293,6 +293,7 @@ func (c *converter) inlineLocalImports(content, srcPath string) string {
 		// Convert Next.js patterns in the component too
 		compContent = convertNextPatterns(compContent)
 		// Remove "export" from the component's function declarations (they'll be local)
+		compContent = regexp.MustCompile(`export\s+async\s+function\s+`).ReplaceAllString(compContent, "async function ")
 		compContent = regexp.MustCompile(`export\s+function\s+`).ReplaceAllString(compContent, "function ")
 		compContent = regexp.MustCompile(`export\s+const\s+`).ReplaceAllString(compContent, "const ")
 
@@ -307,6 +308,12 @@ func (c *converter) inlineLocalImports(content, srcPath string) string {
 	if inlinedCode.Len() > 0 {
 		// Insert inlined code before the first function/export
 		funcIdx := strings.Index(content, "export default function")
+		if funcIdx < 0 {
+			funcIdx = strings.Index(content, "export default async function")
+		}
+		if funcIdx < 0 {
+			funcIdx = strings.Index(content, "export default async")
+		}
 		if funcIdx < 0 {
 			funcIdx = strings.Index(content, "function ")
 		}
