@@ -1048,18 +1048,25 @@ func (c *converter) copyEnvFiles() {
 	if len(c.envVars) == 0 {
 		return
 	}
+	// Filter out dev/Next.js-specific vars
+	skip := map[string]bool{"LUNGO_DEV": true, "NODE_ENV": true}
+
 	var sb strings.Builder
 	for k, v := range c.envVars {
+		if skip[k] {
+			continue
+		}
 		sb.WriteString(k + "=" + v + "\n")
 	}
-	sb.WriteString("LUNGO_DEV=1\n")
 	os.WriteFile(filepath.Join(c.dst, ".env"), []byte(sb.String()), 0644)
 
 	var example strings.Builder
 	for k := range c.envVars {
+		if skip[k] {
+			continue
+		}
 		example.WriteString(k + "=\n")
 	}
-	example.WriteString("LUNGO_DEV=1\n")
 	os.WriteFile(filepath.Join(c.dst, ".env.example"), []byte(example.String()), 0644)
 	fmt.Println("\n  ENV: generated .env and .env.example")
 }
