@@ -187,10 +187,12 @@ func stripTypeScript(s string) string {
 	// Only match <...> NOT starting with / (to avoid stripping </span>)
 	s = regexp.MustCompile(`(\w)<([^/>][^>]*)>(\s*\()`).ReplaceAllString(s, "$1$3")
 
-	// Type assertions: expr as Type → expr (only after ) or identifier, with uppercase type name)
-	// Must not match natural text like "as You" — require preceding ) or word boundary after identifier
+	// Type assertions: expr as Type → expr
+	// Handle: ) as Type, word as Type;, expr as { ... }
 	s = regexp.MustCompile(`(\))\s+as\s+[A-Z]\w*(?:\[\])?`).ReplaceAllString(s, "$1")
 	s = regexp.MustCompile(`(\w)\s+as\s+([A-Z]\w*(?:\[\])?)(\s*[;,\)])`).ReplaceAllString(s, "$1$3")
+	// Handle: expr as { value: Type | Type } (object type assertion)
+	s = regexp.MustCompile(`\s+as\s+\{[^}]*\}`).ReplaceAllString(s, "")
 
 	// React.FC<Props>, React.ReactNode etc in type positions
 	// }: { children: React.ReactNode }) → })
