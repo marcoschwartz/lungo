@@ -1067,9 +1067,10 @@
 
   function RouterView(props) {
     const router = useRouter();
-    // Store page, data, params together so we can swap atomically
+    // Store page state — serverHTML for server-rendered content
     const [view, setView] = useState(() => ({
       Page: window.Lungo?.__initialPage || null,
+      serverHTML: null,
       data: window.Lungo?.__initialData || window.__LUNGO_DATA__ || {},
       params: window.__LUNGO_ROUTE__?.params || {},
       error: null,
@@ -1144,10 +1145,9 @@
           }
 
           // Use server-rendered HTML (like Next.js RSC)
-          // The server already rendered the page — just inject the HTML
-          const ServerPage = () => h("div", { dangerouslySetInnerHTML: { __html: pageData.html } });
           setView({
-            Page: ServerPage,
+            Page: null,
+            serverHTML: pageData.html,
             data: pageData.data || {},
             params: matchedParams,
             error: null,
@@ -1164,7 +1164,7 @@
       loadPage();
     }, [router.pathname, refreshKey]);
 
-    const { Page, data, params, error } = view;
+    const { Page, serverHTML, data, params, error } = view;
 
     // Error state
     if (error) {
@@ -1183,12 +1183,20 @@
       return content;
     }
 
-    if (!Page) {
+    if (!Page && !serverHTML) {
       return h`<div>Loading...</div>`;
     }
 
-    // Normal render: Page wrapped in Layouts (layouts persist, only Page swaps)
-    let content = h`<${Page} data=${data} params=${params} />`;
+    // Build page content — either from component or server-rendered HTML
+    let content;
+    if (serverHTML) {
+      // Server-rendered page — inject HTML directly (no component execution)
+      content = h("div", { dangerouslySetInnerHTML: { __html: serverHTML } });
+    } else {
+      content = h`<${Page} data=${data} params=${params} />`;
+    }
+
+    // Wrap in layouts (layouts are stable — same component reference, won't re-mount)
     for (let i = layouts.length - 1; i >= 0; i--) {
       const entry = layouts[i];
       const Layout = entry && entry.component ? entry.component : entry;
