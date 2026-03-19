@@ -1068,7 +1068,11 @@ func (c *converter) copyEnvFiles() {
 		example.WriteString(k + "=\n")
 	}
 	os.WriteFile(filepath.Join(c.dst, ".env.example"), []byte(example.String()), 0644)
-	fmt.Println("\n  ENV: generated .env and .env.example")
+
+	// Generate .env.production (same as .env, used by deploy-frontend script)
+	os.WriteFile(filepath.Join(c.dst, ".env.production"), []byte(sb.String()), 0644)
+
+	fmt.Println("\n  ENV: generated .env, .env.production, and .env.example")
 }
 
 // ── main.go generation ───────────────────────────────
