@@ -275,6 +275,10 @@ func (t *jsxTranspiler) parseJSXChildren(closeTag string, preserveWhitespace boo
 				// Collapse internal whitespace (newlines, tabs, multiple spaces) to single spaces
 				collapsed := collapseWhitespace(text)
 				children = append(children, `"`+escapeJSString(collapsed)+`"`)
+			} else if len(children) > 0 && len(text) > 0 {
+				// Whitespace-only text between children: preserve as single space
+				// This matches React behavior: <strong>{x}</strong> {name} keeps the space
+				children = append(children, `" "`)
 			}
 		}
 	}

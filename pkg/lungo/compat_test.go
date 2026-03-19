@@ -365,6 +365,30 @@ func TestTranspileHyphenatedAttrs(t *testing.T) {
 	}
 }
 
+func TestTranspileWhitespaceBetweenExpressions(t *testing.T) {
+	// React preserves whitespace between inline elements/expressions
+	// <span><strong>{value}</strong> {name}</span> should keep the space
+	input := `function App() { return (<span><strong>{value}</strong> {name}</span>); }`
+	out := TranspileJSX(input)
+	// Should have " " between the strong's h() call and {name}
+	if !strings.Contains(out, `" "`) {
+		t.Errorf("should preserve space between elements/expressions, got: %s", out)
+	}
+}
+
+func TestTranspileWhitespaceAfterTag(t *testing.T) {
+	// <strong>text</strong> more text — space between </strong> and text should be preserved
+	input := `function App() { return (<span><strong>hello</strong> world</span>); }`
+	out := TranspileJSX(input)
+	if !strings.Contains(out, "world") {
+		t.Errorf("should contain world, got: %s", out)
+	}
+	// The " world" should have a leading space
+	if !strings.Contains(out, `" world"`) && !strings.Contains(out, `" "`) {
+		t.Errorf("should preserve space before 'world', got: %s", out)
+	}
+}
+
 func TestTranspileFullNextPage(t *testing.T) {
 	input := `"use client";
 import { useState } from "react";
