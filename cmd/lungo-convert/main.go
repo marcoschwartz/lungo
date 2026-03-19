@@ -317,8 +317,9 @@ func stripTypeScript(s string) string {
 
 	// Remove : Type annotations from function params
 	// e.g., (props: PageProps) → (props), (val: number | string) → (val)
-	// Handle union types: `: Type1 | Type2 | Type3`
-	s = regexp.MustCompile(`:\s*\w+(?:<[^>]*>)?(?:\s*\|\s*\w+(?:<[^>]*>)?)*(\s*[,)])`).ReplaceAllString(s, "$1")
+	// Only match type names (uppercase or known TS types), not object values like `: 0,`
+	tsTypes := `(?:[A-Z]\w*|string|number|boolean|any|void|null|undefined|never|object|unknown)`
+	s = regexp.MustCompile(`:\s*`+tsTypes+`(?:<[^>]*>)?(?:\s*\|\s*`+tsTypes+`(?:<[^>]*>)?)*(?:\[\])?(\s*[,)])`).ReplaceAllString(s, "$1")
 
 	// Remove complex type annotations on const/let/var declarations
 	// e.g., const colorMap: Record<string, { bg: string }> = { → const colorMap = {

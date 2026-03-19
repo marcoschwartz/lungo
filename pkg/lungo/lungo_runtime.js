@@ -993,7 +993,7 @@
     const link = e.target.closest("a[href]");
     if (!link) return;
     const href = link.getAttribute("href");
-    if (href && !href.startsWith("http") && !href.startsWith("#")) {
+    if (href && !href.startsWith("http") && !href.startsWith("#") && !href.startsWith("mailto:") && !href.startsWith("tel:")) {
       prefetchRoute(href);
     }
   });
