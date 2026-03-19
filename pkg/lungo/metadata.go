@@ -2,6 +2,7 @@ package lungo
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -124,7 +125,11 @@ func jsObjToJSON(s string) string {
 		i++
 	}
 
-	return result.String()
+	// Remove trailing commas before } or ] (invalid in JSON but valid in JS)
+	out := result.String()
+	trailingComma := regexp.MustCompile(`,\s*([}\]])`)
+	out = trailingComma.ReplaceAllString(out, "$1")
+	return out
 }
 
 // renderMetadataHead generates <head> tags from metadata.
