@@ -6,6 +6,35 @@ import (
 	"github.com/marcoschwartz/lungo/pkg/espresso"
 )
 
+// svgAttrMap converts React camelCase SVG attributes to kebab-case HTML attributes.
+var svgAttrMap = map[string]string{
+	"strokeWidth":      "stroke-width",
+	"strokeLinecap":    "stroke-linecap",
+	"strokeLinejoin":   "stroke-linejoin",
+	"strokeDasharray":  "stroke-dasharray",
+	"strokeDashoffset": "stroke-dashoffset",
+	"strokeOpacity":    "stroke-opacity",
+	"strokeMiterlimit": "stroke-miterlimit",
+	"fillRule":         "fill-rule",
+	"fillOpacity":      "fill-opacity",
+	"clipRule":         "clip-rule",
+	"clipPath":         "clip-path",
+	"fontFamily":       "font-family",
+	"fontSize":         "font-size",
+	"fontWeight":       "font-weight",
+	"textAnchor":       "text-anchor",
+	"dominantBaseline": "dominant-baseline",
+	"colorInterpolation":       "color-interpolation",
+	"colorInterpolationFilters": "color-interpolation-filters",
+	"floodColor":      "flood-color",
+	"floodOpacity":    "flood-opacity",
+	"stopColor":       "stop-color",
+	"stopOpacity":     "stop-opacity",
+	"baseFrequency":   "baseFrequency",
+	"viewBox":         "viewBox",
+	"preserveAspectRatio": "preserveAspectRatio",
+}
+
 // RenderSSRHTML converts an SSR vnode tree into an HTML string.
 func RenderSSRHTML(node *ssrNode) string {
 	if node == nil {
@@ -90,6 +119,10 @@ func renderAttrs(props map[string]*espresso.Value, sb *strings.Builder) {
 			key = "class"
 		} else if key == "htmlFor" {
 			key = "for"
+		}
+		// SVG camelCase → kebab-case
+		if svgAttr, ok := svgAttrMap[key]; ok {
+			key = svgAttr
 		}
 
 		// Style object → inline style string
