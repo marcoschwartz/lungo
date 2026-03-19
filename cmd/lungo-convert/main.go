@@ -1002,15 +1002,16 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /server .
+RUN apk add --no-cache upx && upx --best /server
 
-# Run
-FROM alpine:3.21
-WORKDIR /app
-COPY --from=builder /server /app/server
-COPY --from=builder /build/app/ /app/app/
-COPY --from=builder /build/static/ /app/static/%s
+# Run — scratch: no OS, just the binary (~7MB)
+FROM scratch
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /server /server
+COPY --from=builder /build/app/ /app/
+COPY --from=builder /build/static/ /static/%s
 EXPOSE 3000
-CMD ["/app/server"]
+ENTRYPOINT ["/server"]
 `, copyEnv)
 
 	os.WriteFile(filepath.Join(c.dst, "Dockerfile"), []byte(content), 0644)
