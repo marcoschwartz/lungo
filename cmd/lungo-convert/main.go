@@ -364,6 +364,7 @@ func stripTypeScript(s string) string {
 	// e.g., (data as Product[]) → (data)
 	// Must NOT match natural text like "as you", "as needed"
 	s = regexp.MustCompile(`\)\s+as\s+\{[^}]*\}`).ReplaceAllString(s, ")")
+	s = regexp.MustCompile(`(\w)\s+as\s+\{[^}]*\}`).ReplaceAllString(s, "$1")
 	s = regexp.MustCompile(`\)\s+as\s+[A-Z]\w*(?:<[^>]*>)?(?:\[\])?`).ReplaceAllString(s, ")")
 
 	// Remove generic type params: useState<number[]>(...)  → useState(...)
