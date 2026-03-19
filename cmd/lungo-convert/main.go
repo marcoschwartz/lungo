@@ -364,8 +364,9 @@ func stripTypeScript(s string) string {
 
 	// Remove generic type params: useState<number[]>(...)  → useState(...)
 	// Matches <...> when preceded by identifier and followed by (
-	s = regexp.MustCompile(`(\w)\s*<[^>]*>\s*\(`).ReplaceAllStringFunc(s, func(m string) string {
-		re := regexp.MustCompile(`(\w)\s*<[^>]*>\s*\(`)
+	// Only match <...> NOT starting with / (to avoid stripping </span>)
+	s = regexp.MustCompile(`(\w)\s*<([^/>][^>]*)>\s*\(`).ReplaceAllStringFunc(s, func(m string) string {
+		re := regexp.MustCompile(`(\w)\s*<([^/>][^>]*)>\s*\(`)
 		return re.ReplaceAllString(m, "$1(")
 	})
 

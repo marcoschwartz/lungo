@@ -184,8 +184,8 @@ func stripTypeScript(s string) string {
 	s = regexp.MustCompile(`(\w):\s*[A-Z]\w*(?:<[^>]*>)?(\s*[,)])`).ReplaceAllString(s, "$1$2")
 
 	// Generic type params on functions and hooks: useState<number[]>(...) → useState(...)
-	// Only match when preceded by an identifier (not a JSX tag which has whitespace before <)
-	s = regexp.MustCompile(`(\w)<[^>]*>(\s*\()`).ReplaceAllString(s, "$1$2")
+	// Only match <...> NOT starting with / (to avoid stripping </span>)
+	s = regexp.MustCompile(`(\w)<([^/>][^>]*)>(\s*\()`).ReplaceAllString(s, "$1$3")
 
 	// Type assertions: expr as Type → expr (only after ) or identifier, with uppercase type name)
 	// Must not match natural text like "as You" — require preceding ) or word boundary after identifier
