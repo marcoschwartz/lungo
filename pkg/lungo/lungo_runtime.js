@@ -1075,6 +1075,7 @@
       params: window.__LUNGO_ROUTE__?.params || {},
       error: null,
     }));
+    const [loading, setLoading] = useState(false);
     const layouts = props.layouts || [];
     const initialPath = useRef(window.__LUNGO_INITIAL_PATH__);
     const navId = useRef(0); // prevents stale async updates
@@ -1115,6 +1116,9 @@
       // Increment nav ID so stale loads are ignored
       const thisNav = ++navId.current;
 
+      // Fade out current content immediately
+      setLoading(true);
+
       const loadPage = async () => {
         try {
           // Fetch server-rendered page fragment (like Next.js RSC)
@@ -1152,11 +1156,16 @@
             params: matchedParams,
             error: null,
           });
+          setLoading(false);
 
           // Restore or reset scroll after render
-          if (!isRefresh) requestAnimationFrame(() => restoreScroll(router.pathname));
+          if (!isRefresh) requestAnimationFrame(() => {
+            window.scrollTo(0, 0);
+            restoreScroll(router.pathname);
+          });
         } catch (err) {
           if (thisNav !== navId.current) return;
+          setLoading(false);
           setView(prev => ({ ...prev, error: err.message || "Failed to load page" }));
         }
       };
@@ -1190,11 +1199,14 @@
     // Build page content — either from component or server-rendered HTML
     let content;
     if (serverHTML) {
-      // Server-rendered page — inject HTML directly (no component execution)
       content = h("div", { dangerouslySetInnerHTML: { __html: serverHTML } });
     } else {
       content = h`<${Page} data=${data} params=${params} />`;
     }
+
+    // Wrap in transition container for smooth page swaps
+    const transitionStyle = `opacity:${loading ? "0" : "1"};transition:opacity 150ms ease`;
+    content = h("div", { style: transitionStyle }, content);
 
     // Wrap in layouts (layouts are stable — same component reference, won't re-mount)
     for (let i = layouts.length - 1; i >= 0; i--) {
