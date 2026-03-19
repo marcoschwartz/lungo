@@ -26,9 +26,19 @@ func TestIntlNumberFormatCurrency(t *testing.T) {
 			expected: "$7,900",
 		},
 		{
+			name:     "formatPrice function",
+			code:     `function formatPrice(amount, currency) { return new Intl.NumberFormat('en-US', {style: 'currency', currency: currency.toUpperCase(), minimumFractionDigits: 0, maximumFractionDigits: 0}).format(amount / 100); } formatPrice(1900, "usd")`,
+			expected: "$19",
+		},
+		{
 			name:     "formatPrice zero",
 			code:     `function formatPrice(amount, currency) { return new Intl.NumberFormat('en-US', {style: 'currency', currency: currency.toUpperCase(), minimumFractionDigits: 0, maximumFractionDigits: 0}).format(amount / 100); } formatPrice(0, "usd")`,
 			expected: "$0",
+		},
+		{
+			name:     "formatPrice 7900",
+			code:     `function formatPrice(amount, currency) { return new Intl.NumberFormat('en-US', {style: 'currency', currency: currency.toUpperCase(), minimumFractionDigits: 0, maximumFractionDigits: 0}).format(amount / 100); } formatPrice(7900, "usd")`,
+			expected: "$79",
 		},
 	}
 

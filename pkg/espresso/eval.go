@@ -850,7 +850,20 @@ func (e *evaluator) evalFuncCall(fn *Value) *Value {
 	if fn.fnBody != "" {
 		props := make(map[string]*Value)
 		if len(fn.fnParams) > 0 && len(args) > 0 {
-			props[fn.fnParams[0]] = args[0]
+			// fnParams may be ["param1,param2,param3"] — split and bind positionally
+			paramStr := fn.fnParams[0]
+			if strings.Contains(paramStr, ",") {
+				params := strings.Split(paramStr, ",")
+				for i, p := range params {
+					p = strings.TrimSpace(p)
+					if p != "" && i < len(args) {
+						props[p] = args[i]
+					}
+				}
+			} else {
+				// Single param — could be destructured { x, y } or simple name
+				props[paramStr] = args[0]
+			}
 		}
 		return e.callFunc(fn, props)
 	}
@@ -2241,8 +2254,16 @@ func (e *evaluator) callFunc(fn *Value, props map[string]*Value) *Value {
 			}
 		}
 	} else if len(fn.fnParams) > 0 {
-		// Named parameter
-		childScope[fn.fnParams[0]] = newObj(props)
+		// Named parameters — may be comma-separated: "amount, currency"
+		paramStr := fn.fnParams[0]
+		if strings.Contains(paramStr, ",") {
+			// Multiple params — bind from props by name
+			for k, v := range props {
+				childScope[k] = v
+			}
+		} else {
+			childScope[paramStr] = newObj(props)
+		}
 	}
 
 	bodyTokens := tokenize(fn.fnBody)
