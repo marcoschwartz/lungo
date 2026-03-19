@@ -62,8 +62,10 @@ type converter struct {
 	apiRoutes []apiRoute
 	envVars   map[string]string
 	appDir    string // resolved app/ directory path
-	favicon   string // detected favicon path (e.g. "/static/favicon.png")
-	title     string // detected site title from metadata
+	favicon      string // detected favicon path (e.g. "/static/favicon.png")
+	title        string // detected site title from metadata
+	hasAnalytics bool   // detected OmniKit analytics script
+	hasFBPixel   bool   // detected Facebook pixel
 }
 
 func (c *converter) run() {
@@ -266,6 +268,16 @@ func (c *converter) inlineLocalImports(content, srcPath string) string {
 
 		compContent := string(compData)
 		rel, _ := filepath.Rel(c.appDir, resolved)
+
+		// Detect tracking scripts — flag for HeadExtra generation
+		if strings.Contains(compContent, "omnkit") || strings.Contains(compContent, "omnikit") {
+			c.hasAnalytics = true
+			fmt.Printf("  (detected analytics in %s)\n", rel)
+		}
+		if strings.Contains(compContent, "fbq") || strings.Contains(compContent, "FacebookPixel") {
+			c.hasFBPixel = true
+			fmt.Printf("  (detected Facebook pixel in %s)\n", rel)
+		}
 
 		fmt.Printf("  (inlining %s)\n", rel)
 
@@ -1056,17 +1068,69 @@ func (c *converter) copyEnvFiles() {
 
 func (c *converter) generateMainGo() {
 	var sb strings.Builder
-	sb.WriteString(`package main
+	needsFmt := c.hasAnalytics || c.hasFBPixel
+	needsStrings := len(c.envVars) > 0
 
-import (
-	"log"
-	"os"
+	sb.WriteString("package main\n\nimport (\n")
+	if needsFmt {
+		sb.WriteString("\t\"fmt\"\n")
+	}
+	sb.WriteString("\t\"log\"\n\t\"os\"\n")
+	if needsStrings {
+		sb.WriteString("\t\"strings\"\n")
+	}
+	sb.WriteString("\n\t\"github.com/marcoschwartz/lungo/pkg/lungo\"\n)\n\n")
 
-	"github.com/marcoschwartz/lungo/pkg/lungo"
-)
+	// Add tracking script builder if needed
+	if c.hasAnalytics || c.hasFBPixel {
+		sb.WriteString(`func buildTrackingScripts() string {
+	var s string
+`)
+		if c.hasAnalytics {
+			sb.WriteString(`	analyticsURL := os.Getenv("ANALYTICS_URL")
+	projectID := os.Getenv("OMNIKIT_PROJECT_ID")
+	apiKey := os.Getenv("OMNIKIT_API_KEY")
+	if analyticsURL != "" && projectID != "" && apiKey != "" {
+		s += fmt.Sprintf(` + "`" + `
+<script src="%s" defer></script>
+<script>window.omnkitQueue=window.omnkitQueue||[];function omnikit(){omnkitQueue.push(arguments);}omnikit('init','%s','%s');</script>` + "`" + `,
+			analyticsURL, projectID, apiKey)
+	}
+`)
+		}
+		if c.hasFBPixel {
+			sb.WriteString(`	pixelID := os.Getenv("FB_PIXEL_ID")
+	if pixelID != "" {
+		s += fmt.Sprintf(` + "`" + `
+<script>!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');fbq('init','%s');fbq('track','PageView');</script>` + "`" + `, pixelID)
+	}
+`)
+		}
+		sb.WriteString("\treturn s\n}\n\n")
+	}
 
-func main() {
-	dev := os.Getenv("LUNGO_DEV") == "1"
+	// Add env preloader if we have env vars
+	if len(c.envVars) > 0 {
+		sb.WriteString(`func loadEnv() {
+	data, err := os.ReadFile(".env")
+	if err != nil { return }
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' { continue }
+		if eq := strings.IndexByte(line, '='); eq > 0 {
+			if os.Getenv(line[:eq]) == "" { os.Setenv(line[:eq], line[eq+1:]) }
+		}
+	}
+}
+
+`)
+	}
+
+	sb.WriteString("func main() {\n")
+	if len(c.envVars) > 0 {
+		sb.WriteString("\tloadEnv()\n")
+	}
+	sb.WriteString(`	dev := os.Getenv("LUNGO_DEV") == "1"
 
 	app := lungo.New(lungo.Options{
 		AppDir:       "./app",
@@ -1074,9 +1138,19 @@ func main() {
 		Dev:          dev,
 		DefaultTheme: "dark",`)
 
-	// Add HeadExtra with favicon if detected
-	if c.favicon != "" {
-		sb.WriteString(fmt.Sprintf("\n\t\tHeadExtra:    \"<link rel=\\\"icon\\\" href=\\\"%s\\\">\",", c.favicon))
+	// Add HeadExtra with favicon and tracking scripts
+	hasHeadExtra := c.favicon != "" || c.hasAnalytics || c.hasFBPixel
+	if hasHeadExtra {
+		if c.hasAnalytics || c.hasFBPixel {
+			// Use buildTrackingScripts() function for dynamic env-based scripts
+			faviconPart := ""
+			if c.favicon != "" {
+				faviconPart = fmt.Sprintf(`"<link rel=\"icon\" href=\"%s\">" + `, c.favicon)
+			}
+			sb.WriteString(fmt.Sprintf("\n\t\tHeadExtra: %sbuildTrackingScripts(),", faviconPart))
+		} else if c.favicon != "" {
+			sb.WriteString(fmt.Sprintf("\n\t\tHeadExtra:    \"<link rel=\\\"icon\\\" href=\\\"%s\\\">\",", c.favicon))
+		}
 	}
 
 	sb.WriteString(`
@@ -1132,7 +1206,7 @@ func (c *converter) generateGoMod() {
 
 go 1.25.1
 
-require github.com/marcoschwartz/lungo v0.7.5
+require github.com/marcoschwartz/lungo v1.1.0
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
