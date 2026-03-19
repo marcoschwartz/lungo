@@ -96,6 +96,9 @@ func (c *converter) run() {
 	// 8. Copy .env files
 	c.copyEnvFiles()
 
+	// 9. Generate Dockerfile
+	c.generateDockerfile()
+
 	// Summary
 	fmt.Println("\n=== Conversion complete ===")
 	fmt.Printf("  Output: %s\n", c.dst)
@@ -984,6 +987,35 @@ require (
 }
 
 // ── package.json generation ──────────────────────────
+
+func (c *converter) generateDockerfile() {
+	hasEnv := len(c.envVars) > 0
+	copyEnv := ""
+	if hasEnv {
+		copyEnv = "\nCOPY --from=builder /build/.env /app/.env"
+	}
+
+	content := fmt.Sprintf(`# Build
+FROM golang:1.25-alpine AS builder
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /server .
+
+# Run
+FROM alpine:3.21
+WORKDIR /app
+COPY --from=builder /server /app/server
+COPY --from=builder /build/app/ /app/app/
+COPY --from=builder /build/static/ /app/static/%s
+EXPOSE 3000
+CMD ["/app/server"]
+`, copyEnv)
+
+	os.WriteFile(filepath.Join(c.dst, "Dockerfile"), []byte(content), 0644)
+	fmt.Println("  Generated Dockerfile")
+}
 
 func (c *converter) generatePackageJSON() {
 	content := `{
