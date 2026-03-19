@@ -933,24 +933,18 @@
   }
 
   // ─── Link Prefetching ────────────────────────────────────────
+  // Prefetch server-rendered page HTML on hover/visibility for instant navigation
+  const pageCache = new Map(); // href → Promise<{html, data}>
   const prefetchedRoutes = new Set();
 
   function prefetchRoute(href) {
-    if (prefetchedRoutes.has(href)) return;
-    const routes = window.__LUNGO_ROUTES__ || [];
-    for (const r of routes) {
-      if (matchRoute(r.pattern, href)) {
-        prefetchedRoutes.add(href);
-        // Prefetch the page module
-        const link = document.createElement("link");
-        link.rel = "modulepreload";
-        link.href = r.pagePath;
-        document.head.appendChild(link);
-        // Also prefetch loader data
-        fetch("/_data" + href).catch(() => {});
-        break;
-      }
-    }
+    if (pageCache.has(href)) return;
+    if (!isInternalRoute(href)) return;
+    // Start fetching the server-rendered page fragment
+    const promise = fetch("/_page" + href)
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null);
+    pageCache.set(href, promise);
   }
 
   // Prefetch links when they become visible
@@ -1117,10 +1111,18 @@
 
       const loadPage = async () => {
         try {
-          // Fetch server-rendered page fragment (like Next.js RSC)
-          const pageRes = await fetch("/_page" + router.pathname);
-          if (!pageRes.ok) throw new Error("Failed to load page");
-          const pageData = await pageRes.json();
+          // Use prefetched page if available, otherwise fetch now
+          let pageData;
+          if (pageCache.has(router.pathname)) {
+            pageData = await pageCache.get(router.pathname);
+          }
+          if (!pageData) {
+            const pageRes = await fetch("/_page" + router.pathname);
+            if (!pageRes.ok) throw new Error("Failed to load page");
+            pageData = await pageRes.json();
+          }
+          // Cache for back/forward navigation
+          pageCache.set(router.pathname, Promise.resolve(pageData));
 
           // Ignore if a newer navigation happened while we were loading
           if (thisNav !== navId.current) return;
