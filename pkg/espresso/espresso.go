@@ -42,12 +42,17 @@ func (vm *VM) Eval(code string) (*Value, error) {
 			hasStatements = true
 			break
 		}
-		if t.t == tokIdent && (t.v == "const" || t.v == "let" || t.v == "var") {
+		if t.t == tokIdent && (t.v == "const" || t.v == "let" || t.v == "var" || t.v == "function") {
 			hasStatements = true
 			break
 		}
 	}
 	if hasStatements {
+		// Extract function declarations and add to scope
+		funcs := ExtractFunctions(code)
+		for k, v := range funcs {
+			vm.scope[k] = v
+		}
 		ev := &evaluator{tokens: tokens, pos: 0, scope: vm.scope}
 		result := ev.evalStatementsWithLastValue()
 		if result == nil {

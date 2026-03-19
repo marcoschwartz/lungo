@@ -1327,6 +1327,9 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 					}
 				}
 				e.expect(tokRParen)
+				if fn.native != nil {
+					return fn.native(args)
+				}
 				if fn.str == "__arrow" {
 					return callArrow(int(fn.num), args, e.scope)
 				}
@@ -1841,6 +1844,82 @@ func (e *evaluator) primary() *Value {
 		case "new":
 			e.advance()
 			ctor := e.advance().v
+
+			// new Intl.NumberFormat(locale, options) — handle before generic constructor
+			if ctor == "Intl" && e.peek().t == tokDot {
+				e.advance() // skip .
+				subCtor := e.advance().v
+
+				if subCtor == "NumberFormat" && e.peek().t == tokLParen {
+					e.advance() // skip (
+					// Parse locale (skip it)
+					locale := ""
+					if e.peek().t == tokStr {
+						locale = e.advance().v
+						_ = locale
+					}
+					// Parse options object
+					var currency string
+					style := ""
+					minFrac := -1
+					maxFrac := -1
+					if e.peek().t == tokComma {
+						e.advance()
+						if e.peek().t == tokLBrace {
+							opts := e.expr()
+							if opts.typ == TypeObject && opts.object != nil {
+								if s, ok := opts.object["style"]; ok {
+									style = s.toStr()
+								}
+								if c, ok := opts.object["currency"]; ok {
+									currency = c.toStr()
+								}
+								if v, ok := opts.object["minimumFractionDigits"]; ok {
+									minFrac = int(v.toNum())
+								}
+								if v, ok := opts.object["maximumFractionDigits"]; ok {
+									maxFrac = int(v.toNum())
+								}
+							}
+						}
+					}
+					e.expect(tokRParen)
+
+					// Return an object with a .format() method
+					fmtStyle := style
+					fmtCurrency := currency
+					fmtMinFrac := minFrac
+					fmtMaxFrac := maxFrac
+					formatFn := NewNativeFunc(func(args []*Value) *Value {
+						if len(args) == 0 {
+							return internStr("")
+						}
+						n := args[0].toNum()
+						if fmtStyle == "currency" {
+							prefix := "$"
+							switch strings.ToUpper(fmtCurrency) {
+							case "EUR":
+								prefix = "€"
+							case "GBP":
+								prefix = "£"
+							case "JPY":
+								prefix = "¥"
+							}
+							if fmtMaxFrac == 0 {
+								return newStr(prefix + formatWithCommas(int64(n)))
+							}
+							frac := 2
+							if fmtMinFrac >= 0 {
+								frac = fmtMinFrac
+							}
+							return newStr(prefix + strconv.FormatFloat(n, 'f', frac, 64))
+						}
+						return newStr(formatWithCommas(int64(n)))
+					})
+					return newObj(map[string]*Value{"format": formatFn})
+				}
+			}
+			// Generic new Constructor(...) — skip args
 			if e.peek().t == tokLParen {
 				e.advance()
 				for e.peek().t != tokRParen && e.peek().t != tokEOF {
@@ -1850,35 +1929,35 @@ func (e *evaluator) primary() *Value {
 					}
 				}
 				e.expect(tokRParen)
-				if ctor == "Date" {
-					noopStr := func(s string) *Value {
+			}
+			if ctor == "Date" {
+				noopStr := func(s string) *Value {
 						id := registerArrow(&arrowFunc{
 							tokens: append(tokenize(`"`+s+`"`), tok{t: tokEOF}),
 							scope:  make(map[string]*Value),
 						})
 						return &Value{typ: TypeFunc, str: "__arrow", num: float64(id)}
 					}
-					noopNum := func(n float64) *Value {
+				noopNum := func(n float64) *Value {
 						id := registerArrow(&arrowFunc{
 							tokens: append(tokenize(strconv.FormatFloat(n, 'f', -1, 64)), tok{t: tokEOF}),
 							scope:  make(map[string]*Value),
 						})
 						return &Value{typ: TypeFunc, str: "__arrow", num: float64(id)}
 					}
-					return newObj(map[string]*Value{
-						"toLocaleTimeString": noopStr("00:00:00"),
-						"toLocaleDateString": noopStr("1/1/2026"),
-						"toISOString":        noopStr("2026-01-01T00:00:00.000Z"),
-						"toString":           noopStr("Thu Jan 01 2026"),
-						"getTime":            noopNum(0),
-						"getFullYear":        noopNum(2026),
-						"getMonth":           noopNum(0),
-						"getDate":            noopNum(1),
-						"getHours":           noopNum(0),
-						"getMinutes":         noopNum(0),
-						"getSeconds":         noopNum(0),
-					})
-				}
+				return newObj(map[string]*Value{
+					"toLocaleTimeString": noopStr("00:00:00"),
+					"toLocaleDateString": noopStr("1/1/2026"),
+					"toISOString":        noopStr("2026-01-01T00:00:00.000Z"),
+					"toString":           noopStr("Thu Jan 01 2026"),
+					"getTime":            noopNum(0),
+					"getFullYear":        noopNum(2026),
+					"getMonth":           noopNum(0),
+					"getDate":            noopNum(1),
+					"getHours":           noopNum(0),
+					"getMinutes":         noopNum(0),
+					"getSeconds":         noopNum(0),
+				})
 			}
 			return Undefined
 		case "true":
@@ -2768,7 +2847,7 @@ func (e *evaluator) evalStatementsWithLastValue() *Value {
 			return e.expr()
 		}
 
-		// function declaration (skip, already extracted)
+		// function declaration — skip (already registered by ExtractFunctions)
 		if t.t == tokIdent && t.v == "function" {
 			e.advance()
 			if e.peek().t == tokIdent { e.advance() }
