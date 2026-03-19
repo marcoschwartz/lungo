@@ -64,8 +64,9 @@ type converter struct {
 	appDir    string // resolved app/ directory path
 	favicon      string // detected favicon path (e.g. "/static/favicon.png")
 	title        string // detected site title from metadata
-	hasAnalytics bool   // detected OmniKit analytics script
-	hasFBPixel   bool   // detected Facebook pixel
+	hasAnalytics    bool              // detected OmniKit analytics script
+	hasFBPixel      bool              // detected Facebook pixel
+	loaderEndpoints map[string][]string // endpoint → source API URLs
 }
 
 func (c *converter) run() {
@@ -90,7 +91,10 @@ func (c *converter) run() {
 	// 3. Read env files
 	c.readEnvFiles()
 
-	// 4. Generate main.go (uses favicon, title, env vars)
+	// 3c. Scan for loader endpoints in converted pages
+	c.scanLoaderEndpoints()
+
+	// 4. Generate main.go (uses favicon, title, env vars, loader endpoints)
 	fmt.Println("\n=== Generating main.go ===")
 	c.generateMainGo()
 
@@ -939,6 +943,48 @@ func (c *converter) convertStatic() {
 }
 
 // detectFavicon checks for common favicon files in the static output.
+// scanLoaderEndpoints finds all export const loader = { url: "/api/..." } in converted pages
+// and determines what OmniKit API proxy handlers are needed.
+func (c *converter) scanLoaderEndpoints() {
+	c.loaderEndpoints = make(map[string][]string)
+
+	filepath.WalkDir(filepath.Join(c.dst, "app"), func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".jsx") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		content := string(data)
+
+		// Find loader URL
+		loaderRe := regexp.MustCompile(`export const loader = \{\s*url:\s*"([^"]+)"`)
+		if m := loaderRe.FindStringSubmatch(content); m != nil {
+			endpoint := m[1]
+			if strings.HasPrefix(endpoint, "/api/") {
+				// Scan the page for fetch URL patterns to know what to proxy
+				rel, _ := filepath.Rel(filepath.Join(c.dst, "app"), path)
+				fmt.Printf("  Loader: %s → %s\n", rel, endpoint)
+				c.loaderEndpoints[endpoint] = nil // will be populated with source URLs if available
+
+				// Try to detect OmniKit patterns from TODO comments or fetch patterns
+				todoRe := regexp.MustCompile(`//\s*(?:Fetch|fetch).*from:\s*\n(?://\s*//\s*(.+)\n?)*`)
+				if tm := todoRe.FindAllStringSubmatch(content, -1); tm != nil {
+					for _, match := range tm {
+						for _, url := range match[1:] {
+							if url != "" {
+								c.loaderEndpoints[endpoint] = append(c.loaderEndpoints[endpoint], strings.TrimSpace(url))
+							}
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+}
+
 func (c *converter) detectFavicon() {
 	staticDir := filepath.Join(c.dst, "static")
 	for _, name := range []string{"favicon.ico", "favicon.png", "favicon.svg", "icon.png", "icon.ico"} {
@@ -1079,14 +1125,24 @@ func (c *converter) copyEnvFiles() {
 
 func (c *converter) generateMainGo() {
 	var sb strings.Builder
-	needsFmt := c.hasAnalytics || c.hasFBPixel
+	needsFmt := c.hasAnalytics || c.hasFBPixel || len(c.loaderEndpoints) > 0
 	needsStrings := len(c.envVars) > 0
+	needsHTTP := len(c.loaderEndpoints) > 0
 
 	sb.WriteString("package main\n\nimport (\n")
+	if needsHTTP {
+		sb.WriteString("\t\"encoding/json\"\n")
+	}
 	if needsFmt {
 		sb.WriteString("\t\"fmt\"\n")
 	}
-	sb.WriteString("\t\"log\"\n\t\"os\"\n")
+	if needsHTTP {
+		sb.WriteString("\t\"io\"\n")
+	}
+	sb.WriteString("\t\"log\"\n\t\"net/http\"\n\t\"os\"\n")
+	if needsHTTP {
+		sb.WriteString("\t\"sort\"\n")
+	}
 	if needsStrings {
 		sb.WriteString("\t\"strings\"\n")
 	}
@@ -1183,6 +1239,72 @@ func (c *converter) generateMainGo() {
 		sb.WriteString("\n")
 	}
 
+	// Generate OmniKit proxy handlers for loader endpoints
+	if len(c.loaderEndpoints) > 0 {
+		sb.WriteString("\n\t// ── Data Loaders (auto-generated proxies) ──\n")
+		sb.WriteString("\tapiURL := os.Getenv(\"OMNIKIT_API_URL\")\n")
+		sb.WriteString("\tapiKey := os.Getenv(\"OMNIKIT_API_KEY\")\n")
+		sb.WriteString("\tprojectID := os.Getenv(\"OMNIKIT_PROJECT_ID\")\n\n")
+
+		for endpoint := range c.loaderEndpoints {
+			name := strings.TrimPrefix(endpoint, "/api/")
+			// Detect what kind of endpoint this is based on the name
+			if strings.Contains(name, "pricing") {
+				// Pricing — fetch products with prices and features
+				sb.WriteString(fmt.Sprintf("\tapp.API(\"%s\", func(w http.ResponseWriter, r *http.Request) {\n", endpoint))
+				sb.WriteString("\t\turl := fmt.Sprintf(\"%s/billing/products?project_id=%s&include_prices=true&limit=100\", apiURL, projectID)\n")
+				sb.WriteString("\t\tproducts := omnikitGet(url, apiKey)\n")
+				sb.WriteString("\t\tvar parsed map[string]interface{}\n")
+				sb.WriteString("\t\tjson.Unmarshal(products, &parsed)\n")
+				sb.WriteString("\t\tvar productList []map[string]interface{}\n")
+				sb.WriteString("\t\tif data, ok := parsed[\"data\"].([]interface{}); ok {\n")
+				sb.WriteString("\t\t\tfor _, p := range data {\n")
+				sb.WriteString("\t\t\t\tprod := p.(map[string]interface{})\n")
+				sb.WriteString("\t\t\t\tid := prod[\"id\"]\n")
+				sb.WriteString("\t\t\t\tfeatURL := fmt.Sprintf(\"%s/billing/features/product/%v?project_id=%s&limit=100\", apiURL, id, projectID)\n")
+				sb.WriteString("\t\t\t\tvar featParsed map[string]interface{}\n")
+				sb.WriteString("\t\t\t\tjson.Unmarshal(omnikitGet(featURL, apiKey), &featParsed)\n")
+				sb.WriteString("\t\t\t\tif fd, ok := featParsed[\"data\"].([]interface{}); ok { prod[\"features\"] = fd } else { prod[\"features\"] = []interface{}{} }\n")
+				sb.WriteString("\t\t\t\tproductList = append(productList, prod)\n")
+				sb.WriteString("\t\t\t}\n")
+				sb.WriteString("\t\t}\n")
+				sb.WriteString("\t\tsort.Slice(productList, func(i, j int) bool {\n")
+				sb.WriteString("\t\t\treturn getPrice(productList[i]) < getPrice(productList[j])\n")
+				sb.WriteString("\t\t})\n")
+				sb.WriteString("\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n")
+				sb.WriteString("\t\tjson.NewEncoder(w).Encode(map[string]interface{}{\"products\": productList})\n")
+				sb.WriteString("\t})\n\n")
+			} else if strings.Contains(name, "blog") {
+				// Blog — proxy to CMS delivery API
+				contentType := "blog-posts"
+				if strings.Contains(name, "post") || strings.Contains(name, "article") {
+					// Single post endpoint
+					sb.WriteString(fmt.Sprintf("\tapp.API(\"%s\", func(w http.ResponseWriter, r *http.Request) {\n", endpoint))
+					sb.WriteString("\t\tslug := r.URL.Query().Get(\"slug\")\n")
+					sb.WriteString("\t\tif slug == \"\" { w.WriteHeader(404); w.Write([]byte(`{\"error\":\"slug required\"}`)); return }\n")
+					sb.WriteString(fmt.Sprintf("\t\turl := fmt.Sprintf(\"%%s/cms/delivery/%s/%%s?project_id=%%s\", apiURL, slug, projectID)\n", contentType))
+					sb.WriteString("\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n")
+					sb.WriteString("\t\tw.Write(omnikitGet(url, apiKey))\n")
+					sb.WriteString("\t})\n\n")
+				} else {
+					// Blog list endpoint
+					sb.WriteString(fmt.Sprintf("\tapp.API(\"%s\", func(w http.ResponseWriter, r *http.Request) {\n", endpoint))
+					sb.WriteString(fmt.Sprintf("\t\turl := fmt.Sprintf(\"%%s/cms/delivery/%s?project_id=%%s\", apiURL, projectID)\n", contentType))
+					sb.WriteString("\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n")
+					sb.WriteString("\t\tw.Write(omnikitGet(url, apiKey))\n")
+					sb.WriteString("\t})\n\n")
+				}
+			} else {
+				// Generic proxy — just forward to OmniKit
+				sb.WriteString(fmt.Sprintf("\tapp.API(\"%s\", func(w http.ResponseWriter, r *http.Request) {\n", endpoint))
+				sb.WriteString(fmt.Sprintf("\t\turl := fmt.Sprintf(\"%%s/%s?project_id=%%s\", apiURL, projectID)\n", name))
+				sb.WriteString("\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n")
+				sb.WriteString("\t\tw.Write(omnikitGet(url, apiKey))\n")
+				sb.WriteString("\t})\n\n")
+			}
+		}
+	}
+
 	sb.WriteString(`
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -1191,6 +1313,41 @@ func (c *converter) generateMainGo() {
 	log.Fatal(app.ListenAndServe(":" + port))
 }
 `)
+
+	// Add helper functions if needed
+	if len(c.loaderEndpoints) > 0 {
+		sb.WriteString(`
+func omnikitGet(url, apiKey string) []byte {
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return []byte("{}") }
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return body
+}
+`)
+		// Add getPrice helper if pricing endpoint exists
+		for endpoint := range c.loaderEndpoints {
+			if strings.Contains(endpoint, "pricing") {
+				sb.WriteString(`
+func getPrice(product map[string]interface{}) float64 {
+	prices, ok := product["prices"].([]interface{})
+	if !ok || len(prices) == 0 { return 0 }
+	for _, p := range prices {
+		if price, ok := p.(map[string]interface{}); ok {
+			if active, ok := price["active"].(bool); ok && active {
+				if amount, ok := price["unit_amount"].(float64); ok { return amount }
+			}
+		}
+	}
+	return 0
+}
+`)
+				break
+			}
+		}
+	}
 
 	outPath := filepath.Join(c.dst, "main.go")
 	os.WriteFile(outPath, []byte(sb.String()), 0644)
