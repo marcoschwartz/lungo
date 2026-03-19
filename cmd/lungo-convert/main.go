@@ -62,6 +62,8 @@ type converter struct {
 	apiRoutes []apiRoute
 	envVars   map[string]string
 	appDir    string // resolved app/ directory path
+	favicon   string // detected favicon path (e.g. "/static/favicon.png")
+	title     string // detected site title from metadata
 }
 
 func (c *converter) run() {
@@ -77,10 +79,16 @@ func (c *converter) run() {
 	fmt.Println("\n=== Converting static assets ===")
 	c.convertStatic()
 
+	// 2b. Detect favicon
+	c.detectFavicon()
+
+	// 2c. Extract site title from layout metadata
+	c.extractSiteTitle()
+
 	// 3. Read env files
 	c.readEnvFiles()
 
-	// 4. Generate main.go
+	// 4. Generate main.go (uses favicon, title, env vars)
 	fmt.Println("\n=== Generating main.go ===")
 	c.generateMainGo()
 
@@ -787,41 +795,90 @@ func compactCodeSpans(s string) string {
 }
 
 func convertServerComponent(s string) (string, bool) {
-	// Always strip async from the default export — Lungo components must be synchronous
-	if strings.Contains(s, "export default async function") {
-		s = regexp.MustCompile(`export\s+default\s+async\s+function`).ReplaceAllString(s, "export default function")
-		// Remove await expressions (keep the expression after await)
-		s = regexp.MustCompile(`\bawait\s+`).ReplaceAllString(s, "")
-	}
+	hasAsync := strings.Contains(s, "export default async function")
+	// Also detect server components by the presence of async helper functions with fetch
+	hasServerFetch := strings.Contains(s, "async function") && strings.Contains(s, "fetch(")
 
-	// Check for async function with fetch
-	if !strings.Contains(s, "async") || !strings.Contains(s, "fetch(") {
+	if !hasAsync && !hasServerFetch {
 		return s, false
 	}
 
-	// Try to extract fetch URL and convert to loader
-	fetchRe := regexp.MustCompile(`(?s)const\s+\w+\s*=\s*await\s+fetch\(\s*['"]([^'"]+)['"]`)
-	match := fetchRe.FindStringSubmatch(s)
-	if match == nil {
-		return s, false
-	}
-
-	url := match[1]
-
-	// Add loader export
-	loaderLine := fmt.Sprintf("\nexport const loader = { url: \"%s\" };\n", url)
-
-	// Remove async keyword from the function
+	// Strip async from the default export
 	s = regexp.MustCompile(`export\s+default\s+async\s+function`).ReplaceAllString(s, "export default function")
 
-	// Remove the fetch call and .json() call
-	s = fetchRe.ReplaceAllString(s, "// Data loaded via loader (was: fetch)")
-	s = regexp.MustCompile(`(?s)const\s+\w+\s*=\s*await\s+\w+\.json\(\);\n?`).ReplaceAllString(s, "")
+	// Find all fetch URLs in the file
+	fetchRe := regexp.MustCompile(`fetch\(\s*['"]([^'"]+)['"]`)
+	fetchURLRe := regexp.MustCompile(`fetch\(\s*` + "`([^`]+)`")
+	var fetchURLs []string
+	for _, m := range fetchRe.FindAllStringSubmatch(s, -1) {
+		fetchURLs = append(fetchURLs, m[1])
+	}
+	for _, m := range fetchURLRe.FindAllStringSubmatch(s, -1) {
+		fetchURLs = append(fetchURLs, m[1])
+	}
 
-	// Insert loader before the function
+	// Remove await expressions (keep the expression after await)
+	s = regexp.MustCompile(`\bawait\s+`).ReplaceAllString(s, "")
+
+	// Add { data } param to the default export if not already present
+	s = regexp.MustCompile(`export default function (\w+)\(\)`).ReplaceAllString(s, "export default function $1({ data })")
+
+	if len(fetchURLs) == 0 {
+		// Complex case: fetch URLs are dynamic (variables, template literals)
+		// Generate a loader with /api/<pagename> and a TODO comment
+		pageName := "data"
+		nameRe := regexp.MustCompile(`export default function (\w+)`)
+		if m := nameRe.FindStringSubmatch(s); m != nil {
+			name := strings.TrimSuffix(m[1], "Page")
+			pageName = strings.ToLower(name)
+		}
+		loaderLine := fmt.Sprintf("\nexport const loader = { url: \"/api/%s\" };\n", pageName)
+		comment := fmt.Sprintf("// TODO: Add server-side API handler in main.go for /api/%s\n", pageName)
+		funcIdx := strings.Index(s, "export default function")
+		if funcIdx > 0 {
+			s = s[:funcIdx] + comment + loaderLine + "\n" + s[funcIdx:]
+		}
+		return s, true
+	}
+
+	if len(fetchURLs) == 1 {
+		// Simple case: single fetch → direct loader
+		loaderLine := fmt.Sprintf("\nexport const loader = { url: \"%s\" };\n", fetchURLs[0])
+		funcIdx := strings.Index(s, "export default function")
+		if funcIdx > 0 {
+			s = s[:funcIdx] + loaderLine + "\n" + s[funcIdx:]
+		}
+
+		// Remove the fetch call and .json() call
+		s = fetchRe.ReplaceAllString(s, "// Data loaded via loader (was: fetch(\""+fetchURLs[0]+"\")")
+		s = regexp.MustCompile(`const\s+\w+\s*=\s+\w+\.json\(\);\n?`).ReplaceAllString(s, "")
+
+		return s, true
+	}
+
+	// Complex case: multiple fetches → generate /api/<page> handler comment
+	// Add loader pointing to a server-side API endpoint
 	funcIdx := strings.Index(s, "export default function")
+	pageName := "data"
+	nameRe := regexp.MustCompile(`export default function (\w+)`)
+	if m := nameRe.FindStringSubmatch(s); m != nil {
+		// Convert PricingPage → pricing, AboutPage → about
+		name := strings.TrimSuffix(m[1], "Page")
+		pageName = strings.ToLower(name)
+	}
+
+	loaderLine := fmt.Sprintf("\nexport const loader = { url: \"/api/%s\" };\n", pageName)
+	comment := fmt.Sprintf(`// TODO: Add Go API handler in main.go:
+// app.API("/api/%s", func(w http.ResponseWriter, r *http.Request) {
+//   // Fetch and aggregate data from:
+`, pageName)
+	for _, url := range fetchURLs {
+		comment += fmt.Sprintf("//   //   %s\n", url)
+	}
+	comment += "//   // Return combined JSON response\n// })\n"
+
 	if funcIdx > 0 {
-		s = s[:funcIdx] + loaderLine + "\n" + s[funcIdx:]
+		s = s[:funcIdx] + comment + loaderLine + "\n" + s[funcIdx:]
 	}
 
 	return s, true
@@ -867,6 +924,67 @@ func (c *converter) convertStatic() {
 		fmt.Printf("  %s → static/%s\n", rel, rel)
 		return nil
 	})
+}
+
+// detectFavicon checks for common favicon files in the static output.
+func (c *converter) detectFavicon() {
+	staticDir := filepath.Join(c.dst, "static")
+	for _, name := range []string{"favicon.ico", "favicon.png", "favicon.svg", "icon.png", "icon.ico"} {
+		path := filepath.Join(staticDir, name)
+		if _, err := os.Stat(path); err == nil {
+			c.favicon = "/static/" + name
+			fmt.Printf("  Favicon: %s\n", c.favicon)
+			return
+		}
+	}
+	// Also check layout metadata for icons
+	layoutPath := filepath.Join(c.dst, "app", "layout.jsx")
+	if data, err := os.ReadFile(layoutPath); err == nil {
+		content := string(data)
+		if idx := strings.Index(content, `icon: "`); idx >= 0 {
+			rest := content[idx+7:]
+			if end := strings.Index(rest, `"`); end >= 0 {
+				iconPath := rest[:end]
+				// Convert /favicon.png → /static/favicon.png
+				if strings.HasPrefix(iconPath, "/") {
+					c.favicon = "/static" + iconPath
+					fmt.Printf("  Favicon (from metadata): %s\n", c.favicon)
+				}
+			}
+		}
+	}
+}
+
+// extractSiteTitle reads the layout's metadata export to get the site title.
+func (c *converter) extractSiteTitle() {
+	layoutPath := filepath.Join(c.dst, "app", "layout.jsx")
+	data, err := os.ReadFile(layoutPath)
+	if err != nil {
+		return
+	}
+	content := string(data)
+	idx := strings.Index(content, "export const metadata")
+	if idx < 0 {
+		return
+	}
+	// Find title: "..."
+	rest := content[idx:]
+	titleIdx := strings.Index(rest, `title:`)
+	if titleIdx < 0 {
+		return
+	}
+	after := rest[titleIdx+6:]
+	q := strings.Index(after, `"`)
+	if q < 0 {
+		return
+	}
+	after = after[q+1:]
+	q2 := strings.Index(after, `"`)
+	if q2 < 0 {
+		return
+	}
+	c.title = after[:q2]
+	fmt.Printf("  Title: %s\n", c.title)
 }
 
 // ── CSS conversion ───────────────────────────────────
@@ -954,7 +1072,14 @@ func main() {
 		AppDir:       "./app",
 		StaticDir:    "./static",
 		Dev:          dev,
-		DefaultTheme: "dark",
+		DefaultTheme: "dark",`)
+
+	// Add HeadExtra with favicon if detected
+	if c.favicon != "" {
+		sb.WriteString(fmt.Sprintf("\n\t\tHeadExtra:    \"<link rel=\\\"icon\\\" href=\\\"%s\\\">\",", c.favicon))
+	}
+
+	sb.WriteString(`
 		Cache: &lungo.CacheOptions{
 			DefaultMode:      "static",
 			RevalidateSecret: os.Getenv("REVALIDATE_SECRET"),
