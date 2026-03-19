@@ -362,11 +362,10 @@ func stripTypeScript(s string) string {
 	s = regexp.MustCompile(`\)\s+as\s+\{[^}]*\}`).ReplaceAllString(s, ")")
 	s = regexp.MustCompile(`\)\s+as\s+[A-Z]\w*(?:<[^>]*>)?(?:\[\])?`).ReplaceAllString(s, ")")
 
-	// Remove generic type params from functions: <T>(  → (
-	// Only match if preceded by function name/identifier and followed by (
-	s = regexp.MustCompile(`(\w)\s*<\w+(?:\s+extends\s+[^>]+)?>\s*\(`).ReplaceAllStringFunc(s, func(m string) string {
-		// Keep the leading char and opening paren, remove the generic
-		re := regexp.MustCompile(`(\w)\s*<\w+(?:\s+extends\s+[^>]+)?>\s*\(`)
+	// Remove generic type params: useState<number[]>(...)  → useState(...)
+	// Matches <...> when preceded by identifier and followed by (
+	s = regexp.MustCompile(`(\w)\s*<[^>]*>\s*\(`).ReplaceAllStringFunc(s, func(m string) string {
+		re := regexp.MustCompile(`(\w)\s*<[^>]*>\s*\(`)
 		return re.ReplaceAllString(m, "$1(")
 	})
 
