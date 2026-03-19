@@ -191,6 +191,13 @@ func (c *converter) convertFile(srcPath, relPath string) {
 	// Replace HTML entities that JSX would decode
 	content = strings.ReplaceAll(content, "&apos;", "'")
 	content = strings.ReplaceAll(content, "&quot;", `"`)
+	content = strings.ReplaceAll(content, "&amp;", "&")
+	content = strings.ReplaceAll(content, "&copy;", "\u00A9")
+	content = strings.ReplaceAll(content, "&rarr;", "\u2192")
+	content = strings.ReplaceAll(content, "&larr;", "\u2190")
+	content = strings.ReplaceAll(content, "&mdash;", "\u2014")
+	content = strings.ReplaceAll(content, "&ndash;", "\u2013")
+	content = strings.ReplaceAll(content, "&nbsp;", "\u00A0")
 
 	// Layout-specific transforms (remove <html>/<body> wrapper)
 	base := strings.TrimSuffix(filepath.Base(relPath), filepath.Ext(relPath))
@@ -328,10 +335,12 @@ func stripTypeScript(s string) string {
 	// Remove interface/type declarations (including nested braces)
 	s = stripInterfacesAndTypes(s)
 
-	// Remove 'as Type' assertions — handle both `as Word` and `as { ... }`
-	// Match: expr as { ... } and expr as Word<...>
-	s = regexp.MustCompile(`\s+as\s+\{[^}]*\}`).ReplaceAllString(s, "")
-	s = regexp.MustCompile(`\s+as\s+\w+(?:<[^>]*>)?`).ReplaceAllString(s, "")
+	// Remove 'as Type' assertions — only after ) and only for capitalized type names or { }
+	// e.g., (value) as { value: number } → (value)
+	// e.g., (data as Product[]) → (data)
+	// Must NOT match natural text like "as you", "as needed"
+	s = regexp.MustCompile(`\)\s+as\s+\{[^}]*\}`).ReplaceAllString(s, ")")
+	s = regexp.MustCompile(`\)\s+as\s+[A-Z]\w*(?:<[^>]*>)?(?:\[\])?`).ReplaceAllString(s, ")")
 
 	// Remove generic type params from functions: <T>(  → (
 	// Only match if preceded by function name/identifier and followed by (
@@ -520,14 +529,17 @@ func convertNextPatterns(s string) string {
 	s = regexp.MustCompile(`<Link\b`).ReplaceAllString(s, "<a")
 	s = regexp.MustCompile(`</Link>`).ReplaceAllString(s, "</a>")
 
-	// Remove next/image boolean `fill` prop (not SVG fill="value")
-	fillRe := regexp.MustCompile(`\s+fill([=\s/>])`)
+	// Remove next/image boolean `fill` prop — only as a standalone JSX attribute
+	// before /> or > (not in text content like "fill forms")
+	// Match: fill followed by /> or > or another attribute
+	fillRe := regexp.MustCompile(`(\s)fill(\s*/>|\s*>|\s+\w+=)`)
 	s = fillRe.ReplaceAllStringFunc(s, func(m string) string {
 		idx := strings.Index(m, "fill") + 4
 		if idx < len(m) && m[idx] == '=' {
 			return m // keep fill="..." (SVG attribute)
 		}
-		return m[idx:] // remove standalone fill, keep trailing char
+		// Remove standalone fill prop, keep what follows
+		return m[:strings.Index(m, "fill")] + m[idx:]
 	})
 	s = regexp.MustCompile(`\s+sizes="[^"]*"`).ReplaceAllString(s, "")
 	s = regexp.MustCompile(`\s+quality=\{[^}]*\}`).ReplaceAllString(s, "")

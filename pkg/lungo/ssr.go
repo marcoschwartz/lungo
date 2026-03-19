@@ -87,6 +87,24 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 
 	// Extract metadata from page
 	meta := a.extractMetadata(route.PagePath)
+	// Fall back to layout metadata if page has none
+	if (meta == nil || meta.Title == "") && len(route.Layouts) > 0 {
+		for _, layoutPath := range route.Layouts {
+			layoutMeta := a.extractMetadata(layoutPath)
+			if layoutMeta != nil && layoutMeta.Title != "" {
+				if meta == nil {
+					meta = layoutMeta
+				} else {
+					if meta.Title == "" {
+						meta.Title = layoutMeta.Title
+					}
+					if meta.Description == "" {
+						meta.Description = layoutMeta.Description
+					}
+				}
+			}
+		}
+	}
 
 	// Read theme cookie for SSR — render with correct theme to prevent flash
 	isDark := a.opts.DefaultTheme == "dark"
