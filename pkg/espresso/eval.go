@@ -2,6 +2,7 @@ package espresso
 
 import (
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -513,11 +514,13 @@ func (e *evaluator) logicalAnd() *Value {
 	left := e.equality()
 	for e.peek().t == tokAnd {
 		e.advance()
-		right := e.equality()
 		if !left.truthy() {
-			return left
+			// Short-circuit: skip the right side without evaluating
+			e.equality()
+			// left stays false, continue checking for more &&
+			continue
 		}
-		left = right
+		left = e.equality()
 	}
 	return left
 }
@@ -1217,13 +1220,49 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 			}
 			return val
 		}
-		// With comparator callback — skip for now, sort by string
-		e.skipBalanced(tokLParen, tokRParen)
+		// With comparator callback
+		params := e.parseArrowParams()
+		e.expect(tokArrow)
+		bodyStart := e.pos
+		hasBodyBrace := e.peek().t == tokLBrace
+		if hasBodyBrace {
+			e.skipBalanced(tokLBrace, tokRBrace)
+		} else {
+			// expression body — read until )
+			depth := 1
+			for e.pos < len(e.tokens) {
+				if e.tokens[e.pos].t == tokLParen { depth++ }
+				if e.tokens[e.pos].t == tokRParen { depth--; if depth == 0 { break } }
+				e.pos++
+			}
+		}
+		bodyEnd := e.pos
+		e.expect(tokRParen)
+
 		if val.typ == TypeArray {
-			result := make([]*Value, len(val.array))
-			copy(result, val.array)
-			sortValues(result)
-			return newArr(result)
+			// Sort in-place (like JS Array.sort)
+			sort.Slice(val.array, func(i, j int) bool {
+				childScope := make(map[string]*Value, len(e.scope)+2)
+				for k, v := range e.scope { childScope[k] = v }
+				if len(params) > 0 { childScope[params[0]] = val.array[i] }
+				if len(params) > 1 { childScope[params[1]] = val.array[j] }
+				bodyTokens := make([]tok, bodyEnd-bodyStart)
+				copy(bodyTokens, e.tokens[bodyStart:bodyEnd])
+				if hasBodyBrace && len(bodyTokens) >= 2 && bodyTokens[0].t == tokLBrace {
+					bodyTokens = bodyTokens[1 : len(bodyTokens)-1]
+				}
+				bodyTokens = append(bodyTokens, tok{t: tokEOF})
+				childEval := &evaluator{tokens: bodyTokens, pos: 0, scope: childScope}
+				var v *Value
+				if hasBodyBrace {
+					v = childEval.evalStatements()
+				} else {
+					v = childEval.expr()
+				}
+				if v == nil { return false }
+				return v.toNum() < 0
+			})
+			return val // return same array (mutated)
 		}
 		return val
 	case "flat":
