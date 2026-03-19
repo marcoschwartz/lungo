@@ -856,20 +856,52 @@ func convertServerComponent(s string) (string, bool) {
 		// Check if body has fetch/async patterns that should be replaced
 		if strings.Contains(body, "getProducts") || strings.Contains(body, "getContent") ||
 			strings.Contains(body, "Promise.all") || strings.Contains(body, "fetch(") {
-			// Replace with simple data extraction
-			pageName := "data"
-			nameRe := regexp.MustCompile(`function (\w+)\(`)
-			if nm := nameRe.FindStringSubmatch(funcStart); nm != nil {
-				pageName = strings.ToLower(strings.TrimSuffix(nm[1], "Page"))
+
+			// Build data extraction line
+			var dataLine string
+			if strings.Contains(body, "productsWithFeatures") || strings.Contains(body, "getProducts") {
+				dataLine = "  const productsWithFeatures = data && data.products ? data.products : [];\n  const hasProducts = productsWithFeatures.length > 0;\n"
+			} else {
+				pageName := "data"
+				nameRe := regexp.MustCompile(`function (\w+)\(`)
+				if nm := nameRe.FindStringSubmatch(funcStart); nm != nil {
+					pageName = strings.ToLower(strings.TrimSuffix(nm[1], "Page"))
+				}
+				dataLine = fmt.Sprintf("  const %s = data || {};\n", pageName)
 			}
 
-			var newBody string
-			if strings.Contains(body, "productsWithFeatures") || strings.Contains(body, "getProducts") {
-				newBody = "\n  const productsWithFeatures = data && data.products ? data.products : [];\n  const hasProducts = productsWithFeatures.length > 0;\n\n  "
-			} else {
-				newBody = fmt.Sprintf("\n  const %s = data || {};\n\n  ", pageName)
+			// Keep non-fetch lines from the body (constants, helpers, etc.)
+			var kept []string
+			for _, line := range strings.Split(body, "\n") {
+				trimmed := strings.TrimSpace(line)
+				// Skip fetch-related lines
+				if trimmed == "" { continue }
+				if strings.Contains(trimmed, "getProducts") { continue }
+				if strings.Contains(trimmed, "getContent") { continue }
+				if strings.Contains(trimmed, "getProductFeatures") { continue }
+				if strings.Contains(trimmed, "Promise.all") { continue }
+				if strings.Contains(trimmed, "products.map") { continue }
+				if strings.Contains(trimmed, "productsWithFeatures.sort") { continue }
+				if strings.Contains(trimmed, "productsWithFeatures =") { continue }
+				if strings.Contains(trimmed, "hasProducts =") && strings.Contains(trimmed, ".length") { continue }
+				if strings.Contains(trimmed, "...product") { continue }
+				if strings.Contains(trimmed, "features:") && strings.Contains(trimmed, "getProduct") { continue }
+				if strings.Contains(trimmed, "priceA =") || strings.Contains(trimmed, "priceB =") { continue }
+				if trimmed == "}))" || trimmed == "})" || trimmed == "});" || trimmed == ")" || trimmed == ");" { continue }
+				if strings.HasPrefix(trimmed, "return priceA") || strings.HasPrefix(trimmed, "return priceB") { continue }
+				// Keep everything else (planColors, other constants, etc.)
+				kept = append(kept, line)
 			}
-			return funcStart + newBody + returnStart
+
+			var newBody strings.Builder
+			newBody.WriteString("\n")
+			newBody.WriteString(dataLine)
+			for _, line := range kept {
+				newBody.WriteString(line + "\n")
+			}
+			newBody.WriteString("\n  ")
+
+			return funcStart + newBody.String() + returnStart
 		}
 		return m
 	})
