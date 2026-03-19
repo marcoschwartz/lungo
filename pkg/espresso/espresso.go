@@ -30,10 +30,31 @@ func (vm *VM) Get(name string) *Value {
 	return Undefined
 }
 
-// Eval evaluates a JS expression and returns the result.
+// Eval evaluates JS code and returns the result.
+// Handles both single expressions and multi-statement code.
 // Uses token caching — repeated calls with the same code skip tokenization.
 func (vm *VM) Eval(code string) (*Value, error) {
 	tokens := tokenizeCached(code)
+	// Check if this is multi-statement code (has semicolons or declarations)
+	hasStatements := false
+	for _, t := range tokens {
+		if t.t == tokSemi {
+			hasStatements = true
+			break
+		}
+		if t.t == tokIdent && (t.v == "const" || t.v == "let" || t.v == "var") {
+			hasStatements = true
+			break
+		}
+	}
+	if hasStatements {
+		ev := &evaluator{tokens: tokens, pos: 0, scope: vm.scope}
+		result := ev.evalStatementsWithLastValue()
+		if result == nil {
+			return Undefined, nil
+		}
+		return result, nil
+	}
 	ev := &evaluator{tokens: tokens, pos: 0, scope: vm.scope}
 	return ev.expr(), nil
 }

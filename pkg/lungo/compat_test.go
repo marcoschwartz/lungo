@@ -196,13 +196,12 @@ func TestStripAssertion(t *testing.T) {
 // ─── Attribute conversion ───────────────────────────────────────
 
 func TestConvertClassName(t *testing.T) {
+	// className is NOT renamed by compat layer — it's handled by runtime h() and SSR renderAttrs.
+	// This preserves component prop destructuring like { className }.
 	input := `<div className="foo">bar</div>`
 	out := NextCompat(input)
-	if strings.Contains(out, "className") {
-		t.Errorf("should convert className to class, got: %s", out)
-	}
-	if !strings.Contains(out, " class=") {
-		t.Error("should have class attribute")
+	if !strings.Contains(out, "className=") {
+		t.Errorf("should preserve className (handled by runtime), got: %s", out)
 	}
 }
 
@@ -226,10 +225,11 @@ func TestConvertOnChange(t *testing.T) {
 }
 
 func TestConvertHtmlFor(t *testing.T) {
+	// htmlFor is NOT renamed by compat layer — handled by runtime and SSR renderer
 	input := `<label htmlFor="email">Email</label>`
 	out := NextCompat(input)
-	if !strings.Contains(out, " for=") {
-		t.Errorf("should convert htmlFor to for, got: %s", out)
+	if !strings.Contains(out, "htmlFor=") {
+		t.Errorf("should preserve htmlFor (handled by runtime), got: %s", out)
 	}
 }
 
@@ -280,7 +280,6 @@ export default function Page({ title }: Props) {
 		{`from "next"`, "next type import"},
 		{"interface Props", "TypeScript interface"},
 		{": Props", "type annotation"},
-		{"className", "className (should be class)"},
 		{"onClick", "onClick (should be onclick)"},
 		{"<Link ", "Link component"},
 		{"<Image ", "Image component"},
@@ -300,7 +299,7 @@ export default function Page({ title }: Props) {
 		{"window.Lungo", "Lungo destructuring"},
 		{"useState", "useState hook"},
 		{"useEffect", "useEffect hook"},
-		{" class=", "class attribute"},
+		{"className=", "className attribute (renamed by runtime, not compat)"},
 		{" onclick=", "onclick attribute"},
 		{"<a href=", "a tag (converted from Link)"},
 		{"<img src=", "img tag (converted from Image)"},
@@ -383,8 +382,9 @@ export default function Page() {
 	out := TranspileJSX(input)
 
 	// The full pipeline: NextCompat + JSX → h() calls
-	if strings.Contains(out, "className") {
-		t.Error("should convert className")
+	// className is preserved (handled by runtime), not renamed by compat
+	if !strings.Contains(out, "className") {
+		t.Error("should preserve className (handled by runtime)")
 	}
 	if strings.Contains(out, "onClick") {
 		t.Error("should convert onClick")

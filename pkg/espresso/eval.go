@@ -1024,6 +1024,19 @@ func (e *evaluator) handleMethodCall(val *Value, method string) *Value {
 		}
 		e.expect(tokRParen)
 		return newStr(strconv.FormatFloat(val.toNum(), 'f', digits, 64))
+	case "toLocaleString":
+		// Skip args (locale, options) — not used in practice
+		for e.peek().t != tokRParen && e.peek().t != tokEOF {
+			e.expr()
+			if e.peek().t == tokComma { e.advance() }
+		}
+		e.expect(tokRParen)
+		n := val.toNum()
+		if n == float64(int64(n)) {
+			// Integer — format with thousand separators
+			return newStr(formatWithCommas(int64(n)))
+		}
+		return newStr(strconv.FormatFloat(n, 'f', -1, 64))
 	case "isArray":
 		// Array.isArray(x)
 		arg := e.expr()
@@ -1387,19 +1400,26 @@ func (e *evaluator) evalMapFilter(val *Value, method string) *Value {
 		bodyTokens := make([]tok, bodyEnd-bodyStart)
 		copy(bodyTokens, e.tokens[bodyStart:bodyEnd])
 
-		// If body was wrapped in parens, strip outer parens
-		if hasBodyParen && len(bodyTokens) >= 2 && bodyTokens[0].t == tokLParen {
-			bodyTokens = bodyTokens[1 : len(bodyTokens)-1]
-		}
+		var result *Value
 
-		// If body was wrapped in braces, extract return expression
 		if hasBodyBrace && len(bodyTokens) >= 2 && bodyTokens[0].t == tokLBrace {
-			bodyTokens = extractReturnFromBlock(bodyTokens)
+			// Block body — use evalStatements to handle const/let/var + return
+			bodyTokens = bodyTokens[1 : len(bodyTokens)-1] // strip { }
+			bodyTokens = append(bodyTokens, tok{t: tokEOF})
+			childEval := &evaluator{tokens: bodyTokens, pos: 0, scope: childScope}
+			result = childEval.evalStatements()
+			if result == nil {
+				result = Undefined
+			}
+		} else {
+			// Expression body or paren-wrapped
+			if hasBodyParen && len(bodyTokens) >= 2 && bodyTokens[0].t == tokLParen {
+				bodyTokens = bodyTokens[1 : len(bodyTokens)-1]
+			}
+			bodyTokens = append(bodyTokens, tok{t: tokEOF})
+			childEval := &evaluator{tokens: bodyTokens, pos: 0, scope: childScope}
+			result = childEval.expr()
 		}
-
-		bodyTokens = append(bodyTokens, tok{t: tokEOF})
-		childEval := &evaluator{tokens: bodyTokens, pos: 0, scope: childScope}
-		result := childEval.expr()
 
 		if method == "filter" {
 			if result.truthy() {
@@ -2690,6 +2710,85 @@ func (e *evaluator) evalStatements() *Value {
 	return nil
 }
 
+// evalStatementsWithLastValue is like evalStatements but returns the value
+// of the last expression (not just return statements). Used by Eval() for
+// multi-statement code like: `var x = 1; x + 2` → 3
+func (e *evaluator) evalStatementsWithLastValue() *Value {
+	var lastVal *Value
+	for e.peek().t != tokEOF {
+		t := e.peek()
+
+		// const/let/var declaration
+		if t.t == tokIdent && (t.v == "const" || t.v == "let" || t.v == "var") {
+			e.advance()
+			if e.peek().t == tokLBrack {
+				// Array destructuring
+				e.advance()
+				var names []string
+				for e.peek().t != tokRBrack && e.peek().t != tokEOF {
+					if e.peek().t == tokIdent { names = append(names, e.advance().v) } else { e.advance() }
+				}
+				e.expect(tokRBrack)
+				e.expect(tokAssign)
+				val := e.expr()
+				if val.typ == TypeArray {
+					for i, name := range names {
+						if i < len(val.array) { e.scope[name] = val.array[i] } else { e.scope[name] = Undefined }
+					}
+				}
+			} else if e.peek().t == tokLBrace {
+				// Object destructuring
+				e.advance()
+				var names []string
+				for e.peek().t != tokRBrace && e.peek().t != tokEOF {
+					if e.peek().t == tokIdent { names = append(names, e.advance().v) }
+					if e.peek().t == tokComma { e.advance() }
+				}
+				e.expect(tokRBrace)
+				e.expect(tokAssign)
+				val := e.expr()
+				if val.typ == TypeObject && val.object != nil {
+					for _, name := range names {
+						if v, ok := val.object[name]; ok { e.scope[name] = v } else { e.scope[name] = Undefined }
+					}
+				}
+			} else {
+				name := e.advance().v
+				e.expect(tokAssign)
+				val := e.expr()
+				e.scope[name] = val
+			}
+			if e.peek().t == tokSemi { e.advance() }
+			continue
+		}
+
+		// return statement
+		if t.t == tokIdent && t.v == "return" {
+			e.advance()
+			return e.expr()
+		}
+
+		// function declaration (skip, already extracted)
+		if t.t == tokIdent && t.v == "function" {
+			e.advance()
+			if e.peek().t == tokIdent { e.advance() }
+			if e.peek().t == tokLParen { e.skipBalanced(tokLParen, tokRParen) }
+			if e.peek().t == tokLBrace { e.skipBalanced(tokLBrace, tokRBrace) }
+			continue
+		}
+
+		// Expression statement — capture its value as last value
+		if t.t == tokIdent || t.t == tokNum || t.t == tokStr || t.t == tokLParen || t.t == tokLBrack || t.t == tokNot || t.t == tokTemplatePart {
+			lastVal = e.expr()
+			if e.peek().t == tokSemi { e.advance() }
+			continue
+		}
+
+		e.advance()
+	}
+	return lastVal
+}
+
 // evalBlock evaluates statements inside { } until the closing }.
 // Returns non-nil if a return statement was encountered.
 func (e *evaluator) evalBlock() *Value {
@@ -3163,4 +3262,23 @@ func interfaceToValue(v interface{}) *Value {
 		return newObj(obj)
 	}
 	return Null
+}
+
+// formatWithCommas formats an integer with thousand separators (e.g. 1000 → "1,000")
+func formatWithCommas(n int64) string {
+	if n < 0 {
+		return "-" + formatWithCommas(-n)
+	}
+	s := strconv.FormatInt(n, 10)
+	if len(s) <= 3 {
+		return s
+	}
+	var result []byte
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, byte(c))
+	}
+	return string(result)
 }
