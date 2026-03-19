@@ -610,8 +610,29 @@ func convertLayout(s string) string {
 				if strings.Contains(s, "function "+wrappedName+"(") {
 					// Promote: rename the inlined function to be the default export
 					s = strings.Replace(s, "function "+wrappedName+"(", "export default function Layout(", 1)
-					// Remove the old default export function entirely
-					s = s[:defaultFuncIdx] // cut everything from the old export default onward
+
+					// Find the end of the promoted Layout function (match braces from its body)
+					layoutStart := strings.Index(s, "export default function Layout(")
+					if layoutStart >= 0 {
+						// Find the opening { of the function body (after params)
+						parenEnd := strings.Index(s[layoutStart:], ")")
+						if parenEnd >= 0 {
+							searchFrom := layoutStart + parenEnd
+							braceStart := strings.Index(s[searchFrom:], "{")
+							if braceStart >= 0 {
+								pos := searchFrom + braceStart
+								depth := 0
+								for pos < len(s) {
+									if s[pos] == '{' { depth++ }
+									if s[pos] == '}' { depth--; if depth == 0 { pos++; break } }
+									pos++
+								}
+								// Keep everything up to end of Layout, remove the rest
+								// (orphaned analytics/pixel functions + old default export)
+								s = s[:pos] + "\n"
+							}
+						}
+					}
 				}
 			}
 		}
