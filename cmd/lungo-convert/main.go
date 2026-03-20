@@ -164,8 +164,12 @@ func (c *converter) convertPages() {
 		// Skip non-page/layout files (components handled via inlining)
 		base := strings.TrimSuffix(name, filepath.Ext(name))
 		if base != "page" && base != "layout" && base != "loading" && base != "error" && base != "not-found" {
-			// Components in _components/ are inlined by the import resolver, skip silently
-			if strings.Contains(rel, "_components") || strings.Contains(rel, "_lib") || strings.Contains(rel, "lib/") {
+			// Components and lib files are inlined by the import resolver, skip silently
+			if strings.Contains(rel, "_components") || strings.Contains(rel, "components/") ||
+				strings.Contains(rel, "_lib") || strings.Contains(rel, "lib/") ||
+				strings.Contains(rel, "_actions") || strings.Contains(rel, "actions/") ||
+				strings.Contains(rel, "_hooks") || strings.Contains(rel, "hooks/") ||
+				strings.Contains(rel, "_utils") || strings.Contains(rel, "utils/") {
 				return nil
 			}
 			c.warnings = append(c.warnings, "Skipped non-page file: "+rel)
@@ -507,6 +511,12 @@ func convertImports(s string) string {
 	// Remove "use client" / "use server" directives
 	s = regexp.MustCompile(`['"]use (?:client|server)['"];?\n?`).ReplaceAllString(s, "")
 
+	// Strip @marcoschwartz/lite-ui imports and replace components with plain HTML
+	s = regexp.MustCompile(`import\s+\{[^}]+\}\s+from\s+['"]@marcoschwartz/lite-ui['"];?\n?`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`import\s+['"]@marcoschwartz/lite-ui[^'"]*['"];?\n?`).ReplaceAllString(s, "")
+	// Replace lite-ui components with plain HTML equivalents
+	s = replaceLiteUI(s)
+
 	// Build Lungo import — scan actual usage in the final content
 	lungoImports := []string{"h"}
 	for imp := range reactImports {
@@ -626,6 +636,110 @@ func convertNextPatterns(s string) string {
 	s = strings.ReplaceAll(s, `process.env.NODE_ENV`, `"production"`)
 	// Any remaining process.env.X
 	s = regexp.MustCompile(`process\.env\.(\w+)`).ReplaceAllString(s, `(window.__ENV && window.__ENV.$1 || "")`)
+
+	return s
+}
+
+// replaceLiteUI replaces @marcoschwartz/lite-ui components with plain HTML/Tailwind equivalents.
+func replaceLiteUI(s string) string {
+	// Badge → span with rounded-full styling
+	// Match <Badge ...variant="info"...> (variant can be anywhere in attrs)
+	badgeRe := regexp.MustCompile(`<Badge\s+([^>]*?)variant="(\w+)"([^>]*)>`)
+	s = badgeRe.ReplaceAllStringFunc(s, func(m string) string {
+		match := badgeRe.FindStringSubmatch(m)
+		variant := match[2]
+		rest := match[1] + match[3]
+		// Map variant to colors
+		colors := map[string]string{
+			"info":    "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300",
+			"success": "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300",
+			"warning": "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300",
+			"error":   "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300",
+			"primary": "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300",
+			"default": "bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300",
+		}
+		color := colors[variant]
+		if color == "" {
+			color = colors["default"]
+		}
+		// Extract existing className if any
+		existingClass := ""
+		classRe := regexp.MustCompile(`\s+className="([^"]*)"`)
+		if cm := classRe.FindStringSubmatch(rest); len(cm) > 1 {
+			existingClass = " " + cm[1]
+			rest = classRe.ReplaceAllString(rest, "")
+		}
+		return fmt.Sprintf(`<span className="inline-block px-3 py-1 text-sm font-medium %s rounded-full%s"%s>`, color, existingClass, rest)
+	})
+	// Catch any remaining <Badge ...> without variant
+	s = regexp.MustCompile(`<Badge\s+([^>]*)>`).ReplaceAllStringFunc(s, func(m string) string {
+		return `<span className="inline-block px-3 py-1 text-sm font-medium bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 rounded-full">`
+	})
+	s = strings.ReplaceAll(s, "<Badge>", `<span className="inline-block px-3 py-1 text-sm font-medium bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 rounded-full">`)
+	s = strings.ReplaceAll(s, "</Badge>", "</span>")
+
+	// Card → div with border and padding
+	// <Card padding="lg" className="..."> → <div className="p-6 rounded-xl border ...">
+	cardRe := regexp.MustCompile(`<Card([^>]*)>`)
+	s = cardRe.ReplaceAllStringFunc(s, func(m string) string {
+		attrs := cardRe.FindStringSubmatch(m)[1]
+		existingClass := ""
+		classRe := regexp.MustCompile(`\s+className="([^"]*)"`)
+		if cm := classRe.FindStringSubmatch(attrs); len(cm) > 1 {
+			existingClass = " " + cm[1]
+		}
+		return fmt.Sprintf(`<div className="p-6 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800%s">`, existingClass)
+	})
+	s = strings.ReplaceAll(s, "</Card>", "</div>")
+
+	// Button → a or button
+	// <Button variant="primary" size="sm" onClick={...}> → <button className="...">
+	// <Button variant="secondary" ...> → <button className="...">
+	// <Button> (no attrs) → <button className="...">
+	s = strings.ReplaceAll(s, "<Button>", `<button className="py-2 px-4 rounded-lg bg-purple-600 text-white text-sm font-medium hover:bg-purple-700">`)
+	btnRe := regexp.MustCompile(`<Button\s+([^>]*)>`)
+	s = btnRe.ReplaceAllStringFunc(s, func(m string) string {
+		attrs := btnRe.FindStringSubmatch(m)[1]
+		isPrimary := strings.Contains(attrs, `variant="primary"`)
+		// Extract onClick
+		onClickRe := regexp.MustCompile(`onClick=\{([^}]+)\}`)
+		onClick := ""
+		if om := onClickRe.FindStringSubmatch(attrs); len(om) > 1 {
+			onClick = fmt.Sprintf(` onClick={%s}`, om[1])
+		}
+		existingClass := ""
+		classRe := regexp.MustCompile(`\s+className="([^"]*)"`)
+		if cm := classRe.FindStringSubmatch(attrs); len(cm) > 1 {
+			existingClass = " " + cm[1]
+		}
+		if isPrimary {
+			return fmt.Sprintf(`<button className="py-2 px-4 rounded-lg bg-purple-600 text-white text-sm font-medium hover:bg-purple-700%s"%s>`, existingClass, onClick)
+		}
+		return fmt.Sprintf(`<button className="py-2 px-4 rounded-lg border border-neutral-300 dark:border-neutral-700 text-sm font-medium hover:bg-neutral-100 dark:hover:bg-neutral-800%s"%s>`, existingClass, onClick)
+	})
+	s = strings.ReplaceAll(s, "</Button>", "</button>")
+
+	// AppShell → plain div (remove the component wrapper)
+	appShellRe := regexp.MustCompile(`(?s)<AppShell[^>]*>`)
+	s = appShellRe.ReplaceAllString(s, "<div>")
+	s = strings.ReplaceAll(s, "</AppShell>", "</div>")
+
+	// ThemeProvider / ColorSchemeScript — remove wrapper, keep children
+	s = regexp.MustCompile(`<ThemeProvider[^>]*>`).ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, "</ThemeProvider>", "")
+	s = regexp.MustCompile(`<ColorSchemeScript[^/]*/>`).ReplaceAllString(s, "")
+
+	// Input → plain input
+	inputRe := regexp.MustCompile(`<Input\s`)
+	s = inputRe.ReplaceAllString(s, `<input className="w-full px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800" `)
+
+	// Textarea → plain textarea
+	s = regexp.MustCompile(`<Textarea\s`).ReplaceAllString(s, `<textarea className="w-full px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800" `)
+	s = strings.ReplaceAll(s, "</Textarea>", "</textarea>")
+
+	// Select → plain select
+	s = regexp.MustCompile(`<Select\s`).ReplaceAllString(s, `<select className="w-full px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800" `)
+	s = strings.ReplaceAll(s, "</Select>", "</select>")
 
 	return s
 }
@@ -1137,8 +1251,11 @@ func (c *converter) convertCSS() {
 	for _, name := range []string{"globals.css", "global.css", "app/globals.css", "src/app/globals.css"} {
 		path := filepath.Join(c.src, name)
 		if data, err := os.ReadFile(path); err == nil {
-			// Write as input.css
-			os.WriteFile(filepath.Join(c.dst, "app", "input.css"), data, 0644)
+			// Strip lite-ui references
+			css := string(data)
+			css = regexp.MustCompile(`@source\s+"[^"]*lite-ui[^"]*";\n?`).ReplaceAllString(css, "")
+			css = regexp.MustCompile(`@import\s+"[^"]*lite-ui[^"]*";\n?`).ReplaceAllString(css, "")
+			os.WriteFile(filepath.Join(c.dst, "app", "input.css"), []byte(css), 0644)
 			fmt.Printf("\n  CSS: %s → app/input.css\n", name)
 			return
 		}
