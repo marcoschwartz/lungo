@@ -996,24 +996,35 @@ func (c *converter) collectAPIRoute(path, rel string) {
 // ── Static assets ────────────────────────────────────
 
 func (c *converter) convertStatic() {
+	// Copy from public/ directory
 	publicDir := filepath.Join(c.src, "public")
-	if _, err := os.Stat(publicDir); err != nil {
+	if _, err := os.Stat(publicDir); err == nil {
+		filepath.WalkDir(publicDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			rel, _ := filepath.Rel(publicDir, path)
+			dst := filepath.Join(c.dst, "static", rel)
+			os.MkdirAll(filepath.Dir(dst), 0755)
+			data, _ := os.ReadFile(path)
+			os.WriteFile(dst, data, 0644)
+			fmt.Printf("  %s → static/%s\n", rel, rel)
+			return nil
+		})
+	} else {
 		fmt.Println("  No public/ directory")
-		return
 	}
 
-	filepath.WalkDir(publicDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+	// Next.js App Router: favicon/icon in app/ directory
+	appDir := filepath.Join(c.src, "app")
+	for _, name := range []string{"favicon.ico", "favicon.png", "icon.png", "icon.ico", "icon.svg", "apple-icon.png"} {
+		src := filepath.Join(appDir, name)
+		if data, err := os.ReadFile(src); err == nil {
+			dst := filepath.Join(c.dst, "static", name)
+			os.WriteFile(dst, data, 0644)
+			fmt.Printf("  app/%s → static/%s\n", name, name)
 		}
-		rel, _ := filepath.Rel(publicDir, path)
-		dst := filepath.Join(c.dst, "static", rel)
-		os.MkdirAll(filepath.Dir(dst), 0755)
-		data, _ := os.ReadFile(path)
-		os.WriteFile(dst, data, 0644)
-		fmt.Printf("  %s → static/%s\n", rel, rel)
-		return nil
-	})
+	}
 }
 
 // detectFavicon checks for common favicon files in the static output.
