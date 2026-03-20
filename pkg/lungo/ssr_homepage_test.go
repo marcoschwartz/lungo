@@ -1,7 +1,7 @@
 package lungo
 
 import (
-	"github.com/marcoschwartz/lungo/pkg/espresso"
+	"github.com/marcoschwartz/espresso"
 	"os"
 	"strings"
 	"testing"

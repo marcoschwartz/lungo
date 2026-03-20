@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/marcoschwartz/lungo/pkg/espresso"
+	"github.com/marcoschwartz/espresso"
 )
 
 // ─── SSR Page Cache ─────────────────────────────────────────────

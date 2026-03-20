@@ -7,4 +7,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 )
 
-require golang.org/x/sys v0.13.0 // indirect
+require (
+	github.com/marcoschwartz/espresso v0.0.0-20260320091806-2f44c14da265 // indirect
+	golang.org/x/sys v0.13.0 // indirect
+)

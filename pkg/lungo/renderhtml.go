@@ -3,7 +3,7 @@ package lungo
 import (
 	"strings"
 
-	"github.com/marcoschwartz/lungo/pkg/espresso"
+	"github.com/marcoschwartz/espresso"
 )
 
 // svgAttrMap converts React camelCase SVG attributes to kebab-case HTML attributes.

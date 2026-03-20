@@ -6,7 +6,7 @@ package lungo
 import (
 	"strings"
 
-	"github.com/marcoschwartz/lungo/pkg/espresso"
+	"github.com/marcoschwartz/espresso"
 )
 
 // ── SSR Scope Setup ─────────────────────────────────────
