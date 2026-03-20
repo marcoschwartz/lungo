@@ -66,6 +66,8 @@ type converter struct {
 	title        string // detected site title from metadata
 	hasAnalytics    bool              // detected OmniKit analytics script
 	hasFBPixel      bool              // detected Facebook pixel
+	hasAuth         bool              // detected auth system (middleware.ts or _actions/auth)
+	authRoutes      []string          // public routes from middleware
 	loaderEndpoints map[string][]string // endpoint → source API URLs
 }
 
@@ -77,6 +79,9 @@ func (c *converter) run() {
 	// 1. Convert pages
 	fmt.Println("=== Converting pages ===")
 	c.convertPages()
+
+	// 1b. Detect auth system
+	c.detectAuth()
 
 	// 2. Convert static assets
 	fmt.Println("\n=== Converting static assets ===")
@@ -245,26 +250,64 @@ func (c *converter) convertFile(srcPath, relPath string) {
 // inlineLocalImports resolves local imports (e.g. from "./_components/Foo")
 // and inlines the component code directly into the file.
 func (c *converter) inlineLocalImports(content, srcPath string) string {
-	// Match: import { Foo } from "./_components/Foo"
-	// Match: import { Foo, Bar } from "./lib/utils"
-	localImportRe := regexp.MustCompile(`import\s+\{([^}]+)\}\s+from\s+['"](\.[^'"]+)['"];?\n?`)
-	matches := localImportRe.FindAllStringSubmatch(content, -1)
-	if len(matches) == 0 {
-		return content
-	}
-
 	srcDir := filepath.Dir(srcPath)
 	var inlinedCode strings.Builder
 
-	for _, m := range matches {
-		importPath := m[2]
-		// Skip react/next imports (already handled)
-		if !strings.HasPrefix(importPath, ".") {
-			continue
+	// Match named imports: import { Foo, Bar } from "./path"
+	namedImportRe := regexp.MustCompile(`import\s+\{([^}]+)\}\s+from\s+['"](\.[^'"]+)['"];?\n?`)
+	// Match default imports: import Foo from "./path"
+	defaultImportRe := regexp.MustCompile(`import\s+(\w+)\s+from\s+['"](\.[^'"]+)['"];?\n?`)
+	// Match @/ alias imports: import { x } from "@/lib/api" or import X from "@/lib/api"
+	aliasNamedRe := regexp.MustCompile(`import\s+\{([^}]+)\}\s+from\s+['"]@/([^'"]+)['"];?\n?`)
+	aliasDefaultRe := regexp.MustCompile(`import\s+(\w+)\s+from\s+['"]@/([^'"]+)['"];?\n?`)
+
+	// Collect all local imports to inline
+	type importMatch struct {
+		full       string
+		importPath string
+		isAlias    bool
+	}
+	var imports []importMatch
+
+	for _, m := range namedImportRe.FindAllStringSubmatch(content, -1) {
+		if strings.HasPrefix(m[2], ".") {
+			imports = append(imports, importMatch{m[0], m[2], false})
 		}
+	}
+	for _, m := range defaultImportRe.FindAllStringSubmatch(content, -1) {
+		if strings.HasPrefix(m[2], ".") {
+			// Skip if already matched by named import
+			if !strings.Contains(content, "{ "+m[1]) {
+				imports = append(imports, importMatch{m[0], m[2], false})
+			}
+		}
+	}
+	for _, m := range aliasNamedRe.FindAllStringSubmatch(content, -1) {
+		imports = append(imports, importMatch{m[0], m[2], true})
+	}
+	for _, m := range aliasDefaultRe.FindAllStringSubmatch(content, -1) {
+		imports = append(imports, importMatch{m[0], m[2], true})
+	}
+
+	if len(imports) == 0 {
+		return content
+	}
+
+	for _, imp := range imports {
+		importPath := imp.importPath
 
 		// Resolve to actual file path
-		resolved := c.resolveImportPath(srcDir, importPath)
+		var resolved string
+		if imp.isAlias {
+			// @/lib/api → resolve from app root
+			resolved = c.resolveImportPath(c.appDir, "./"+importPath)
+			if resolved == "" {
+				// Try from src root
+				resolved = c.resolveImportPath(filepath.Dir(c.appDir), importPath)
+			}
+		} else {
+			resolved = c.resolveImportPath(srcDir, importPath)
+		}
 		if resolved == "" {
 			continue
 		}
@@ -294,8 +337,9 @@ func (c *converter) inlineLocalImports(content, srcPath string) string {
 		compContent = regexp.MustCompile(`['"]use (?:client|server)['"];?\n?`).ReplaceAllString(compContent, "")
 		// Remove all import lines from the component (they'll be merged with the parent)
 		compContent = regexp.MustCompile(`(?m)^import\s+.*;\n?`).ReplaceAllString(compContent, "")
-		// Convert Next.js patterns in the component too
+		// Convert Next.js patterns and strip lite-ui in the component too
 		compContent = convertNextPatterns(compContent)
+		compContent = replaceLiteUI(compContent)
 		// Remove "export" from the component's function declarations (they'll be local)
 		compContent = regexp.MustCompile(`export\s+async\s+function\s+`).ReplaceAllString(compContent, "async function ")
 		compContent = regexp.MustCompile(`export\s+function\s+`).ReplaceAllString(compContent, "function ")
@@ -306,7 +350,7 @@ func (c *converter) inlineLocalImports(content, srcPath string) string {
 		inlinedCode.WriteString("\n\n")
 
 		// Remove the import line from parent
-		content = strings.Replace(content, m[0], "", 1)
+		content = strings.Replace(content, imp.full, "", 1)
 	}
 
 	if inlinedCode.Len() > 0 {
@@ -742,6 +786,200 @@ func replaceLiteUI(s string) string {
 	s = strings.ReplaceAll(s, "</Select>", "</select>")
 
 	return s
+}
+
+// detectAuth checks for Next.js auth patterns (middleware.ts, _actions/auth.ts, _lib/auth.ts)
+func (c *converter) detectAuth() {
+	// Check for middleware.ts
+	for _, name := range []string{"middleware.ts", "middleware.js", "src/middleware.ts"} {
+		path := filepath.Join(c.src, name)
+		if data, err := os.ReadFile(path); err == nil {
+			content := string(data)
+			if strings.Contains(content, "cookie") || strings.Contains(content, "token") ||
+				strings.Contains(content, "auth") || strings.Contains(content, "login") {
+				c.hasAuth = true
+				// Extract public routes
+				re := regexp.MustCompile(`const\s+publicRoutes\s*=\s*\[([^\]]+)\]`)
+				if m := re.FindStringSubmatch(content); len(m) > 1 {
+					for _, r := range strings.Split(m[1], ",") {
+						r = strings.TrimSpace(r)
+						r = strings.Trim(r, `"'`)
+						if r != "" {
+							c.authRoutes = append(c.authRoutes, r)
+						}
+					}
+				}
+				fmt.Println("  (detected auth middleware)")
+			}
+			break
+		}
+	}
+	// Check for auth actions
+	for _, name := range []string{"app/_actions/auth.ts", "app/_actions/auth.js", "src/app/_actions/auth.ts"} {
+		if _, err := os.Stat(filepath.Join(c.src, name)); err == nil {
+			c.hasAuth = true
+			fmt.Println("  (detected auth actions)")
+			break
+		}
+	}
+}
+
+// generateAuthCode generates Go auth middleware and API routes for the main.go
+func (c *converter) generateAuthCode(sb *strings.Builder) {
+	if !c.hasAuth {
+		return
+	}
+
+	// Build public routes list
+	publicRoutes := `"/login", "/register", "/forgot-password", "/reset-password"`
+	if len(c.authRoutes) > 0 {
+		quoted := make([]string, len(c.authRoutes))
+		for i, r := range c.authRoutes {
+			quoted[i] = `"` + r + `"`
+		}
+		publicRoutes = strings.Join(quoted, ", ")
+	}
+
+	sb.WriteString(`
+	// ── Auth & API Config ──
+	apiURL := os.Getenv("OMNIKIT_API_URL")
+	apiKey := os.Getenv("OMNIKIT_API_KEY")
+	projectID := os.Getenv("OMNIKIT_PROJECT_ID")
+
+	// ── Auth Middleware ──
+	// Protects routes, manages JWT cookies, auto-refreshes tokens
+	authPublicRoutes := []string{` + publicRoutes + `}
+	app.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.Path
+			// Skip static files and API routes
+			if strings.HasPrefix(path, "/static/") || strings.HasPrefix(path, "/api/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Check if public route
+			isPublic := false
+			for _, pub := range authPublicRoutes {
+				if strings.HasPrefix(path, pub) {
+					isPublic = true
+					break
+				}
+			}
+			accessToken, _ := r.Cookie("omnikit_access_token")
+			refreshTokenCookie, _ := r.Cookie("omnikit_refresh_token")
+			// If logged in and on auth page, redirect to dashboard
+			isAuthPage := strings.HasPrefix(path, "/login") || strings.HasPrefix(path, "/register")
+			if accessToken != nil && isAuthPage {
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
+			// Protected route — need token
+			if !isPublic {
+				if accessToken == nil && refreshTokenCookie != nil {
+					// Try refresh
+					newAccess := refreshAuthToken(apiURL, apiKey, refreshTokenCookie.Value)
+					if newAccess != "" {
+						http.SetCookie(w, &http.Cookie{Name: "omnikit_access_token", Value: newAccess, Path: "/", HttpOnly: true, MaxAge: 900})
+						next.ServeHTTP(w, r)
+						return
+					}
+					// Refresh failed — clear and redirect
+					http.SetCookie(w, &http.Cookie{Name: "omnikit_access_token", Path: "/", MaxAge: -1})
+					http.SetCookie(w, &http.Cookie{Name: "omnikit_refresh_token", Path: "/", MaxAge: -1})
+					http.Redirect(w, r, "/login?redirect="+path, http.StatusFound)
+					return
+				}
+				if accessToken == nil {
+					http.Redirect(w, r, "/login?redirect="+path, http.StatusFound)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// ── Auth API Routes ──
+	app.API("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		var body struct {
+			Email      string ` + "`" + `json:"email"` + "`" + `
+			Password   string ` + "`" + `json:"password"` + "`" + `
+			RememberMe bool   ` + "`" + `json:"rememberMe"` + "`" + `
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		// Proxy to OmniKit auth
+		resp := proxyAuthPost(apiURL+"/auth/login", apiKey, map[string]interface{}{
+			"email": body.Email, "password": body.Password, "project_id": projectID,
+		})
+		if accessToken, ok := resp["access_token"].(string); ok {
+			maxAge := 900
+			http.SetCookie(w, &http.Cookie{Name: "omnikit_access_token", Value: accessToken, Path: "/", HttpOnly: true, MaxAge: maxAge})
+			if rt, ok := resp["refresh_token"].(string); ok {
+				rtMaxAge := 7 * 24 * 3600
+				if body.RememberMe { rtMaxAge = 30 * 24 * 3600 }
+				http.SetCookie(w, &http.Cookie{Name: "omnikit_refresh_token", Value: rt, Path: "/", HttpOnly: true, MaxAge: rtMaxAge})
+			}
+			if user, ok := resp["user"]; ok {
+				uj, _ := json.Marshal(user)
+				http.SetCookie(w, &http.Cookie{Name: "omnikit_user", Value: string(uj), Path: "/", HttpOnly: true, MaxAge: 30 * 24 * 3600})
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	app.API("/api/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		body["project_id"] = projectID
+		resp := proxyAuthPost(apiURL+"/auth/register", apiKey, body)
+		if accessToken, ok := resp["access_token"].(string); ok {
+			http.SetCookie(w, &http.Cookie{Name: "omnikit_access_token", Value: accessToken, Path: "/", HttpOnly: true, MaxAge: 900})
+			if rt, ok := resp["refresh_token"].(string); ok {
+				http.SetCookie(w, &http.Cookie{Name: "omnikit_refresh_token", Value: rt, Path: "/", HttpOnly: true, MaxAge: 30 * 24 * 3600})
+			}
+			if user, ok := resp["user"]; ok {
+				uj, _ := json.Marshal(user)
+				http.SetCookie(w, &http.Cookie{Name: "omnikit_user", Value: string(uj), Path: "/", HttpOnly: true, MaxAge: 30 * 24 * 3600})
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	app.API("/api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		// Try to call backend logout
+		if c, err := r.Cookie("omnikit_access_token"); err == nil {
+			req, _ := http.NewRequest("POST", apiURL+"/auth/logout", nil)
+			req.Header.Set("Authorization", "Bearer "+c.Value)
+			req.Header.Set("X-API-Key", apiKey)
+			http.DefaultClient.Do(req)
+		}
+		http.SetCookie(w, &http.Cookie{Name: "omnikit_access_token", Path: "/", MaxAge: -1})
+		http.SetCookie(w, &http.Cookie{Name: "omnikit_refresh_token", Path: "/", MaxAge: -1})
+		http.SetCookie(w, &http.Cookie{Name: "omnikit_user", Path: "/", MaxAge: -1})
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(` + "`" + `{"success":true}` + "`" + `))
+	})
+
+	app.API("/api/auth/me", func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie("omnikit_user"); err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(c.Value))
+			return
+		}
+		w.WriteHeader(401)
+		w.Write([]byte(` + "`" + `{"error":"not authenticated"}` + "`" + `))
+	})
+
+`)
 }
 
 // convertLayout transforms a Next.js RootLayout (wrapping <html><body>) to a Lungo layout.
@@ -1328,10 +1566,13 @@ func (c *converter) copyEnvFiles() {
 func (c *converter) generateMainGo() {
 	var sb strings.Builder
 	needsFmt := c.hasAnalytics || c.hasFBPixel || len(c.loaderEndpoints) > 0
-	needsStrings := len(c.envVars) > 0
-	needsHTTP := len(c.loaderEndpoints) > 0
+	needsStrings := len(c.envVars) > 0 || c.hasAuth
+	needsHTTP := len(c.loaderEndpoints) > 0 || c.hasAuth
 
 	sb.WriteString("package main\n\nimport (\n")
+	if c.hasAuth {
+		sb.WriteString("\t\"bytes\"\n")
+	}
 	if needsHTTP {
 		sb.WriteString("\t\"encoding/json\"\n")
 	}
@@ -1342,7 +1583,12 @@ func (c *converter) generateMainGo() {
 		sb.WriteString("\t\"io\"\n")
 	}
 	sb.WriteString("\t\"log\"\n\t\"net/http\"\n\t\"os\"\n")
-	if needsHTTP {
+	// Only add sort if pricing endpoint exists
+	hasPricing := false
+	for ep := range c.loaderEndpoints {
+		if strings.Contains(ep, "pricing") { hasPricing = true; break }
+	}
+	if hasPricing {
 		sb.WriteString("\t\"sort\"\n")
 	}
 	if needsStrings {
@@ -1432,6 +1678,9 @@ func (c *converter) generateMainGo() {
 	app.Use(lungo.CORS(lungo.CORSOptions{AllowOrigins: []string{"*"}}))
 `)
 
+	// Add auth middleware and routes if detected
+	c.generateAuthCode(&sb)
+
 	// Add API routes as TODOs
 	if len(c.apiRoutes) > 0 {
 		sb.WriteString("\n\t// ── API Routes (converted from Next.js) ──\n")
@@ -1444,9 +1693,12 @@ func (c *converter) generateMainGo() {
 	// Generate OmniKit proxy handlers for loader endpoints
 	if len(c.loaderEndpoints) > 0 {
 		sb.WriteString("\n\t// ── Data Loaders (auto-generated proxies) ──\n")
-		sb.WriteString("\tapiURL := os.Getenv(\"OMNIKIT_API_URL\")\n")
-		sb.WriteString("\tapiKey := os.Getenv(\"OMNIKIT_API_KEY\")\n")
-		sb.WriteString("\tprojectID := os.Getenv(\"OMNIKIT_PROJECT_ID\")\n\n")
+		if !c.hasAuth {
+			// Only define if not already defined by auth section
+			sb.WriteString("\tapiURL := os.Getenv(\"OMNIKIT_API_URL\")\n")
+			sb.WriteString("\tapiKey := os.Getenv(\"OMNIKIT_API_KEY\")\n")
+			sb.WriteString("\tprojectID := os.Getenv(\"OMNIKIT_PROJECT_ID\")\n\n")
+		}
 
 		for endpoint := range c.loaderEndpoints {
 			name := strings.TrimPrefix(endpoint, "/api/")
@@ -1549,6 +1801,43 @@ func getPrice(product map[string]interface{}) float64 {
 				break
 			}
 		}
+	}
+
+	// Add auth helper functions if needed
+	if c.hasAuth {
+		sb.WriteString(`
+func refreshAuthToken(apiURL, apiKey, refreshToken string) string {
+	body, _ := json.Marshal(map[string]string{"refresh_token": refreshToken})
+	req, _ := http.NewRequest("POST", apiURL+"/auth/refresh", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 { return "" }
+	defer resp.Body.Close()
+	var data map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&data)
+	if at, ok := data["access_token"].(string); ok { return at }
+	return ""
+}
+
+func proxyAuthPost(url, apiKey string, body interface{}) map[string]interface{} {
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return map[string]interface{}{"success": false, "error": "network error"} }
+	defer resp.Body.Close()
+	var data map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&data)
+	if resp.StatusCode >= 400 {
+		data["success"] = false
+	} else {
+		data["success"] = true
+	}
+	return data
+}
+`)
 	}
 
 	outPath := filepath.Join(c.dst, "main.go")
