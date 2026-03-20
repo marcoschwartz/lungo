@@ -111,6 +111,10 @@ func (r *Router) addRoute(relPath string) {
 		if p == "" {
 			continue
 		}
+		// Route groups: (auth), (protected) — don't affect URL
+		if strings.HasPrefix(p, "(") && strings.HasSuffix(p, ")") {
+			continue
+		}
 		if strings.HasPrefix(p, "[") && strings.HasSuffix(p, "]") {
 			param := p[1 : len(p)-1]
 			segments = append(segments, param)
