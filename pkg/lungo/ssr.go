@@ -160,6 +160,14 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 		sb.WriteString("  window.__LUNGO_DEV__ = true;\n")
 	}
 
+	// Inject LUNGO_PUBLIC_* env vars for client-side process.env access
+	if len(a.publicEnv) > 0 {
+		envJSON, _ := json.Marshal(a.publicEnv)
+		sb.WriteString(fmt.Sprintf("  window.__LUNGO_ENV__ = %s;\n", envJSON))
+	} else {
+		sb.WriteString("  window.__LUNGO_ENV__ = {};\n")
+	}
+
 	routeInfo := map[string]interface{}{
 		"pattern":  route.Pattern,
 		"params":   route.Segments,

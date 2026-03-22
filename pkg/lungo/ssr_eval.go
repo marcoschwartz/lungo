@@ -118,6 +118,15 @@ func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, param
 	}
 	scope["params"] = espresso.NewObj(paramsObj)
 
+	// Inject process.env with LUNGO_PUBLIC_* vars (like Next.js process.env)
+	envObj := make(map[string]*espresso.Value, len(a.publicEnv))
+	for k, v := range a.publicEnv {
+		envObj[k] = espresso.NewStr(v)
+	}
+	scope["process"] = espresso.NewObj(map[string]*espresso.Value{
+		"env": espresso.NewObj(envObj),
+	})
+
 	if strings.Contains(cached.funcParams, "{") {
 		// Destructured — data/params already in scope
 	} else if cached.funcParams != "" {
@@ -246,6 +255,15 @@ func (a *App) evaluateLayoutWithData(layoutPath string, childrenHTML string, isD
 	} else {
 		scope["data"] = espresso.Null
 	}
+
+	// Inject process.env with LUNGO_PUBLIC_* vars
+	envObj := make(map[string]*espresso.Value, len(a.publicEnv))
+	for k, v := range a.publicEnv {
+		envObj[k] = espresso.NewStr(v)
+	}
+	scope["process"] = espresso.NewObj(map[string]*espresso.Value{
+		"env": espresso.NewObj(envObj),
+	})
 
 	// Handle destructured params
 	if strings.Contains(cached.funcParams, "{") {

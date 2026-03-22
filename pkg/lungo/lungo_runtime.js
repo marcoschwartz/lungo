@@ -1274,4 +1274,8 @@
 
   window.Lungo = Lungo;
   if (typeof globalThis !== "undefined") globalThis.Lungo = Lungo;
+
+  // Expose LUNGO_PUBLIC_* env vars as process.env (like Next.js)
+  if (typeof window.process === "undefined") window.process = {};
+  window.process.env = window.__LUNGO_ENV__ || {};
 })();

@@ -88,6 +88,7 @@ type App struct {
 	hmr         *HMR
 	htmlCache   map[string]*htmlCacheEntry
 	htmlCacheMu sync.RWMutex
+	publicEnv   map[string]string // LUNGO_PUBLIC_* env vars exposed to JSX
 }
 
 type htmlCacheEntry struct {
@@ -148,10 +149,21 @@ func New(opts Options) *App {
 		opts.StaticDir = absStatic
 	}
 
+	// Collect LUNGO_PUBLIC_* env vars for client/SSR access
+	publicEnv := make(map[string]string)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "LUNGO_PUBLIC_") {
+			if i := strings.IndexByte(kv, '='); i > 0 {
+				publicEnv[kv[:i]] = kv[i+1:]
+			}
+		}
+	}
+
 	app := &App{
 		opts:      opts,
 		apiRoutes: make(map[string]http.HandlerFunc),
 		htmlCache: make(map[string]*htmlCacheEntry),
+		publicEnv: publicEnv,
 	}
 
 	if opts.AppFS != nil {
