@@ -9,6 +9,7 @@
   const EMPTY_OBJ = {};
   const EMPTY_ARR = [];
   const TEXT_NODE = "#text";
+  const PORTAL = Symbol("portal");
 
   function createVNode(tag, props, children) {
     return { tag, props: props || EMPTY_OBJ, children: children || EMPTY_ARR, _dom: null };
@@ -16,6 +17,17 @@
 
   function createTextVNode(text) {
     return { tag: TEXT_NODE, props: EMPTY_OBJ, children: EMPTY_ARR, _text: String(text), _dom: null };
+  }
+
+  // ─── Portal ──────────────────────────────────────────────────────
+  // createPortal(children, container) renders vdom into any DOM node,
+  // like React's createPortal. Used for modals, tooltips, dropdowns.
+
+  function createPortal(children, container) {
+    const normalized = Array.isArray(children)
+      ? children.map(normalizeChild).flat()
+      : normalizeChild(children).flat ? normalizeChild(children) : [normalizeChild(children)];
+    return { tag: PORTAL, props: EMPTY_OBJ, children: normalized, _container: container, _dom: null };
   }
 
   // ─── Tagged Template Parser ────────────────────────────────────────
@@ -473,6 +485,18 @@
       return dom;
     }
 
+    // Portal — render children into target container, return a placeholder comment
+    if (vnode.tag === PORTAL) {
+      const container = vnode._container;
+      for (const child of vnode.children) {
+        const childDom = createDom(child, container);
+        if (childDom) container.appendChild(childDom);
+      }
+      const placeholder = document.createComment("portal");
+      vnode._dom = placeholder;
+      return placeholder;
+    }
+
     // Component
     if (typeof vnode.tag === "function") {
       const children = vnode.children || [];
@@ -532,6 +556,13 @@
 
     if (!newVNode) {
       removeDom(oldVNode);
+      return;
+    }
+
+    // Portal — diff children inside the portal container
+    if (newVNode.tag === PORTAL && oldVNode.tag === PORTAL) {
+      newVNode._dom = oldVNode._dom; // keep placeholder comment
+      diffChildren(newVNode._container, oldVNode.children, newVNode.children);
       return;
     }
 
@@ -635,6 +666,15 @@
   }
 
   function removeDom(vnode) {
+    // Portal: remove children from portal container + remove placeholder
+    if (vnode.tag === PORTAL) {
+      if (vnode.children) {
+        for (const child of vnode.children) removeDom(child);
+      }
+      const placeholder = vnode._dom;
+      if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
+      return;
+    }
     const dom = getDom(vnode);
     if (dom && dom.parentNode) dom.parentNode.removeChild(dom);
     cleanupInstance(vnode);
@@ -1238,6 +1278,7 @@
     useRouter,
     navigate,
     createVNode,
+    createPortal,
     RouterView,
     LungoImage,
     Image: LungoImage,

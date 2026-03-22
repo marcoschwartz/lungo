@@ -81,6 +81,15 @@ func stubHooksInScope(scope map[string]*espresso.Value, pathname string) {
 		return evalHCallFromArgs(scope, args)
 	})
 
+	// createPortal(children, container) — in SSR, just renders children inline (no DOM)
+	scope["createPortal"] = espresso.NewNativeFunc(func(args []*espresso.Value) *espresso.Value {
+		if len(args) == 0 {
+			return espresso.Undefined
+		}
+		// Return children as-is — they render inline during SSR
+		return args[0]
+	})
+
 	// Image component — renders <img> with loading/priority attributes
 	scope["Image"] = espresso.NewNativeFunc(func(args []*espresso.Value) *espresso.Value {
 		props := make(map[string]*espresso.Value)
