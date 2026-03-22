@@ -410,6 +410,13 @@ func (a *App) serveAppFile(w http.ResponseWriter, r *http.Request, name string) 
 		} else {
 			data = []byte(result)
 		}
+		// Auto-inject h from window.Lungo if not already present.
+		// The JSX transpiler converts <div> to h("div",...) but doesn't inject h.
+		// Without this, component files that lack an explicit import/destructure will
+		// fail with "h is not a function" at runtime.
+		if !strings.Contains(string(data), "window.Lungo") {
+			data = []byte("const { h, Fragment, useState, useEffect, useMemo, useRef, useRouter, createPortal } = window.Lungo;\n" + string(data))
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/javascript")
