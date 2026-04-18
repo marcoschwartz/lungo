@@ -20,7 +20,7 @@ func (a *App) serveStreamingSSR(w http.ResponseWriter, r *http.Request, route *R
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Transfer-Encoding", "chunked")
 
-	// Phase 1: Send the shell immediately
+	// Phase 1: Flush <head> immediately so the browser starts fetching CSS.
 	var sb strings.Builder
 	sb.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
 	sb.WriteString("  <meta charset=\"UTF-8\">\n")
@@ -28,27 +28,38 @@ func (a *App) serveStreamingSSR(w http.ResponseWriter, r *http.Request, route *R
 	sb.WriteString("  <title>Lungo App</title>\n")
 	sb.WriteString("  <link rel=\"stylesheet\" href=\"/static/styles.css\">\n")
 	sb.WriteString("</head>\n<body>\n")
-	sb.WriteString(`<div id="root">`)
-	sb.WriteString(`<div data-hydrate="app">`)
-	sb.WriteString(`<div id="rg-placeholder-content" class="rg-placeholder">Loading...</div>`)
-	sb.WriteString("</div></div>\n")
-
 	w.Write([]byte(sb.String()))
 	flusher.Flush()
 
-	// Phase 2: Fetch data and stream it in
+	// Phase 2: Fetch loader data and SSR the page. Only after this do we have
+	// real HTML to stream — streaming the <head> early still wins TTFB.
 	var loaderData json.RawMessage
 	if route.HasLoader && route.LoaderURL != "" {
 		loaderData = a.fetchLoaderData(route, r)
 	}
 
-	// Phase 3: Send the resolved content + boot script
-	sb.Reset()
+	ssrHTML, _, ssrErr := a.evaluatePageSSR(route.PagePath, loaderData, route.Segments)
+	hasSSR := ssrErr == nil && ssrHTML != ""
+	var innerHTML string
+	if hasSSR {
+		ssrHTML, _ = a.wrapInLayoutsWithData(ssrHTML, route, false, r)
+		innerHTML = ssrHTML
+	} else {
+		innerHTML = a.renderLayoutShell(route)
+	}
 
-	// Send the data
+	// Phase 3: Emit #root with real SSR content + boot data.
+	sb.Reset()
+	sb.WriteString(`<div id="root">`)
+	sb.WriteString(innerHTML)
+	sb.WriteString("</div>\n\n")
+
 	sb.WriteString("<script>\n")
 	if a.opts.Dev {
 		sb.WriteString("  window.__LUNGO_DEV__ = true;\n")
+	}
+	if hasSSR {
+		sb.WriteString(fmt.Sprintf("  window.__LUNGO_SSR_HASH__ = %q;\n", ssrTagHash(innerHTML)))
 	}
 
 	routeInfo := map[string]interface{}{
@@ -78,25 +89,13 @@ func (a *App) serveStreamingSSR(w http.ResponseWriter, r *http.Request, route *R
 	w.Write([]byte(sb.String()))
 	flusher.Flush()
 
-	// Phase 4: Replace placeholder with real content
-	sb.Reset()
-
-	// Resolve the placeholder
-	sb.WriteString(`<template data-chunk="content">`)
-	sb.WriteString(a.renderLayoutShell(route))
-	sb.WriteString("</template>\n")
-	sb.WriteString(`<script>window.__RG_RESOLVE("content");</script>`)
-	sb.WriteString("\n")
-
-	w.Write([]byte(sb.String()))
-	flusher.Flush()
-
-	// Phase 5: Boot script
+	// Phase 4: Boot script — hydrate if we have real SSR content, otherwise
+	// render client-side.
 	sb.Reset()
 	sb.WriteString(`<script src="/runtime/lungo.js"></script>`)
 	sb.WriteString("\n")
 	sb.WriteString("<script type=\"module\">\n")
-	sb.WriteString("  const { h, render, RouterView } = window.Lungo;\n\n")
+	sb.WriteString("  const { h, render, hydrate, RouterView } = window.Lungo;\n\n")
 
 	pURL := pageURL(route.PagePath)
 	sb.WriteString(fmt.Sprintf("  const initialPage = await import('%s');\n", pURL))
@@ -118,7 +117,11 @@ func (a *App) serveStreamingSSR(w http.ResponseWriter, r *http.Request, route *R
 	}
 	sb.WriteString("];\n\n")
 
-	sb.WriteString("  render(h`<${RouterView} layouts=${layouts} />`, document.getElementById('root'));\n")
+	if hasSSR {
+		sb.WriteString("  hydrate(h`<${RouterView} layouts=${layouts} />`, document.getElementById('root'));\n")
+	} else {
+		sb.WriteString("  render(h`<${RouterView} layouts=${layouts} />`, document.getElementById('root'));\n")
+	}
 	sb.WriteString("</script>\n</body>\n</html>")
 
 	w.Write([]byte(sb.String()))

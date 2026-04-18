@@ -2,6 +2,8 @@
 package lungo
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -13,6 +15,38 @@ import (
 	"sync"
 	"time"
 )
+
+// safeJoin joins base + name and refuses paths that escape base via "..",
+// absolute paths, or symlink-style tricks. Returns ("", false) on violation.
+func safeJoin(base, name string) (string, bool) {
+	if name == "" {
+		return base, true
+	}
+	// Reject absolute paths and null bytes outright.
+	if strings.ContainsRune(name, 0) || filepath.IsAbs(name) {
+		return "", false
+	}
+	clean := filepath.Clean("/" + name)
+	full := filepath.Join(base, clean)
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", false
+	}
+	absFull, err := filepath.Abs(full)
+	if err != nil {
+		return "", false
+	}
+	if absFull != absBase && !strings.HasPrefix(absFull, absBase+string(filepath.Separator)) {
+		return "", false
+	}
+	return full, true
+}
+
+// contentETag returns a strong sha256-based ETag for the given bytes.
+func contentETag(data []byte) string {
+	sum := sha256.Sum256(data)
+	return `"` + hex.EncodeToString(sum[:16]) + `"`
+}
 
 // Middleware is a function that wraps an http.Handler.
 type Middleware func(http.Handler) http.Handler
@@ -88,6 +122,8 @@ type App struct {
 	hmr         *HMR
 	htmlCache   map[string]*htmlCacheEntry
 	htmlCacheMu sync.RWMutex
+	jsxCache    map[string]jsxCacheEntry
+	jsxCacheMu  sync.RWMutex
 	publicEnv   map[string]string // LUNGO_PUBLIC_* env vars exposed to JSX
 }
 
@@ -95,6 +131,13 @@ type htmlCacheEntry struct {
 	html      string
 	cachedAt  time.Time
 	ttl       time.Duration // 0 = forever (static mode)
+}
+
+// jsxCacheEntry caches transpiled JSX so we don't re-run the transpiler on every request.
+type jsxCacheEntry struct {
+	data    []byte
+	etag    string
+	modTime time.Time
 }
 
 // loadEnvFile loads environment variables from a .env file.
@@ -163,6 +206,7 @@ func New(opts Options) *App {
 		opts:      opts,
 		apiRoutes: make(map[string]http.HandlerFunc),
 		htmlCache: make(map[string]*htmlCacheEntry),
+		jsxCache:  make(map[string]jsxCacheEntry),
 		publicEnv: publicEnv,
 	}
 
@@ -248,7 +292,7 @@ func (a *App) buildHandler() http.Handler {
 			if a.opts.Dev {
 				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			} else {
-				etag := fmt.Sprintf(`"%x"`, len(runtimeJS))
+				etag := contentETag(runtimeJS)
 				w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
 				w.Header().Set("ETag", etag)
 				if r.Header.Get("If-None-Match") == etag {
@@ -348,7 +392,11 @@ func (a *App) serveStatic(w http.ResponseWriter, r *http.Request, name string) {
 			return
 		}
 	} else {
-		filePath := filepath.Join(a.opts.StaticDir, name)
+		filePath, ok := safeJoin(a.opts.StaticDir, name)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
 		data, err := os.ReadFile(filePath)
 		if err == nil {
 			w.Header().Set("Content-Type", detectContentType(name))
@@ -365,57 +413,48 @@ func (a *App) serveStatic(w http.ResponseWriter, r *http.Request, name string) {
 }
 
 func (a *App) serveAppFile(w http.ResponseWriter, r *http.Request, name string) {
-	needsTranspile := false
-
-	// Try exact .js file on disk first
+	// In-memory cache keyed by requested name. Invalidated by file modtime
+	// (disk) or served forever (embedded FS, since bytes are immutable).
+	cached, ok := a.jsxCacheGet(name)
 	var data []byte
-	var err error
+	var etag string
+	var modTime time.Time
 
-	if a.opts.AppFS != nil {
-		data, err = fs.ReadFile(a.opts.AppFS, name)
+	if ok && a.opts.AppFS != nil {
+		data, etag = cached.data, cached.etag
 	} else {
-		data, err = os.ReadFile(filepath.Join(a.opts.AppDir, name))
-	}
-
-	if err != nil && strings.HasSuffix(name, ".js") {
-		// .js not found — try .jsx
-		jsxName := strings.TrimSuffix(name, ".js") + ".jsx"
-		if a.opts.AppFS != nil {
-			data, err = fs.ReadFile(a.opts.AppFS, jsxName)
-		} else {
-			data, err = os.ReadFile(filepath.Join(a.opts.AppDir, jsxName))
-		}
+		// Resolve + read the file, falling back from .js to .jsx.
+		var err error
+		var resolved string
+		data, resolved, modTime, err = a.readWithFallback(name)
 		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		needsTranspile = true
-	} else if err != nil {
-		http.NotFound(w, r)
-		return
-	} else if strings.HasSuffix(name, ".jsx") {
-		needsTranspile = true
-	}
 
-	if needsTranspile {
-		result, jsxErrors := TranspileJSXWithErrors(string(data))
-		if len(jsxErrors) > 0 && a.opts.Dev {
-			log.Printf("[Lungo] JSX errors in %s:", name)
-			for _, e := range jsxErrors {
-				log.Printf("  - %s", e)
-			}
-			// Inject console.error so the browser shows the error
-			errorJS := "console.error('[Lungo JSX Error] " + strings.ReplaceAll(jsxErrors[0], "'", "\\'") + "');\n"
-			data = []byte(errorJS + result)
+		if ok && !modTime.IsZero() && cached.modTime.Equal(modTime) {
+			data, etag = cached.data, cached.etag
 		} else {
-			data = []byte(result)
-		}
-		// Auto-inject h from window.Lungo if not already present.
-		// The JSX transpiler converts <div> to h("div",...) but doesn't inject h.
-		// Without this, component files that lack an explicit import/destructure will
-		// fail with "h is not a function" at runtime.
-		if !strings.Contains(string(data), "window.Lungo") {
-			data = []byte("const { h, Fragment, useState, useEffect, useMemo, useRef, useRouter, createPortal } = window.Lungo;\n" + string(data))
+			needsTranspile := strings.HasSuffix(resolved, ".jsx")
+			if needsTranspile {
+				result, jsxErrors := TranspileJSXWithErrors(string(data))
+				if len(jsxErrors) > 0 && a.opts.Dev {
+					log.Printf("[Lungo] JSX errors in %s:", name)
+					for _, e := range jsxErrors {
+						log.Printf("  - %s", e)
+					}
+					errorJS := "console.error('[Lungo JSX Error] " + strings.ReplaceAll(jsxErrors[0], "'", "\\'") + "');\n"
+					data = []byte(errorJS + result)
+				} else {
+					data = []byte(result)
+				}
+				// Auto-inject h if the transpiled module didn't reference window.Lungo.
+				if !strings.Contains(string(data), "window.Lungo") {
+					data = []byte("const { h, Fragment, useState, useEffect, useMemo, useRef, useRouter, createPortal } = window.Lungo;\n" + string(data))
+				}
+			}
+			etag = contentETag(data)
+			a.jsxCachePut(name, jsxCacheEntry{data: data, etag: etag, modTime: modTime})
 		}
 	}
 
@@ -423,8 +462,6 @@ func (a *App) serveAppFile(w http.ResponseWriter, r *http.Request, name string) 
 	if a.opts.Dev {
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	} else {
-		// Short cache + ETag for revalidation — ensures fresh code after deployments
-		etag := fmt.Sprintf(`"%x"`, len(data))
 		w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
 		w.Header().Set("ETag", etag)
 		if r.Header.Get("If-None-Match") == etag {
@@ -433,6 +470,53 @@ func (a *App) serveAppFile(w http.ResponseWriter, r *http.Request, name string) 
 		}
 	}
 	w.Write(data)
+}
+
+// readWithFallback resolves a request path against AppFS/AppDir, falling back
+// from .js to .jsx. It refuses paths that escape AppDir.
+// Returns (contents, resolved name, modtime, err). modtime is zero for AppFS.
+func (a *App) readWithFallback(name string) ([]byte, string, time.Time, error) {
+	tryNames := []string{name}
+	if strings.HasSuffix(name, ".js") {
+		tryNames = append(tryNames, strings.TrimSuffix(name, ".js")+".jsx")
+	}
+	if a.opts.AppFS != nil {
+		for _, n := range tryNames {
+			if data, err := fs.ReadFile(a.opts.AppFS, n); err == nil {
+				return data, n, time.Time{}, nil
+			}
+		}
+		return nil, "", time.Time{}, os.ErrNotExist
+	}
+	for _, n := range tryNames {
+		full, ok := safeJoin(a.opts.AppDir, n)
+		if !ok {
+			return nil, "", time.Time{}, os.ErrPermission
+		}
+		st, err := os.Stat(full)
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			continue
+		}
+		return data, n, st.ModTime(), nil
+	}
+	return nil, "", time.Time{}, os.ErrNotExist
+}
+
+func (a *App) jsxCacheGet(name string) (jsxCacheEntry, bool) {
+	a.jsxCacheMu.RLock()
+	defer a.jsxCacheMu.RUnlock()
+	e, ok := a.jsxCache[name]
+	return e, ok
+}
+
+func (a *App) jsxCachePut(name string, e jsxCacheEntry) {
+	a.jsxCacheMu.Lock()
+	a.jsxCache[name] = e
+	a.jsxCacheMu.Unlock()
 }
 
 func (a *App) serveSSRWithRecovery(w http.ResponseWriter, r *http.Request) {

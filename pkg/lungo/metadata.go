@@ -2,6 +2,7 @@ package lungo
 
 import (
 	"encoding/json"
+	"html"
 	"regexp"
 	"strings"
 )
@@ -140,12 +141,12 @@ func renderMetadataHead(meta *PageMetadata) string {
 	var sb strings.Builder
 	if meta.Title != "" {
 		sb.WriteString("  <title>")
-		sb.WriteString(meta.Title)
+		sb.WriteString(html.EscapeString(meta.Title))
 		sb.WriteString("</title>\n")
 	}
 	if meta.Description != "" {
 		sb.WriteString("  <meta name=\"description\" content=\"")
-		sb.WriteString(meta.Description)
+		sb.WriteString(html.EscapeString(meta.Description))
 		sb.WriteString("\">\n")
 	}
 	return sb.String()

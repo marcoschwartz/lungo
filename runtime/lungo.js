@@ -691,10 +691,41 @@
     try {
       hydrateNode(vnode, container.firstElementChild || container.firstChild, container);
       container.__vnode = vnode;
+      verifyHydrationStructure(container);
     } catch (e) {
       // Hydration mismatch — fall back to full client render (same as React/Next.js)
       console.warn("[Lungo] Hydration mismatch, falling back to client render:", e.message);
       render(vnode, container);
+    }
+  }
+
+  // verifyHydrationStructure hashes the container's element tag sequence using
+  // the same FNV-1a 32-bit scheme as the server. If the hash doesn't match what
+  // the server injected, we log a dev warning — this catches silent drift where
+  // SSR and client produced different tag structures (e.g. branching on random
+  // or time-sensitive input) which would otherwise leak as stale handlers.
+  function verifyHydrationStructure(container) {
+    const expected = window.__LUNGO_SSR_HASH__;
+    if (!expected || !window.__LUNGO_DEV__) return;
+    let h = 0x811c9dc5; // FNV-1a 32 offset basis
+    function fold(byte) {
+      h ^= byte;
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    function walk(node) {
+      if (!node || node.nodeType !== 1) return;
+      const tag = node.tagName.toLowerCase();
+      for (let i = 0; i < tag.length; i++) fold(tag.charCodeAt(i));
+      fold(44); // ','
+      for (const c of node.childNodes) walk(c);
+    }
+    for (const c of container.childNodes) walk(c);
+    const actual = (h >>> 0).toString(16);
+    if (actual !== expected) {
+      console.warn(
+        `[Lungo] Hydration structure mismatch (SSR=${expected} client=${actual}). ` +
+        `A component likely rendered different tags on server vs client.`
+      );
     }
   }
 

@@ -18,3 +18,7 @@ Thumbs.db
 
 # Benchmark artifacts
 benchmark/
+
+# Local build artifacts
+/espresso
+/lungo-convert

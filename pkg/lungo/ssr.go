@@ -3,7 +3,10 @@ package lungo
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"html"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -82,6 +85,23 @@ func pageURL(relPath string) string {
 	return "/app/" + relPath
 }
 
+// tagOpenRE extracts opening element tag names from HTML.
+// It ignores close tags (</...), doctype, and comments (<!...).
+var tagOpenRE = regexp.MustCompile(`<([a-zA-Z][a-zA-Z0-9-]*)`)
+
+// ssrTagHash computes an FNV-1a 32-bit hash over the sequence of opening tag
+// names in the SSR HTML. The client computes the same hash over the live DOM
+// after hydration and warns on mismatch — catching silent hydration drift
+// (e.g. components that branch on Date.now() or random input).
+func ssrTagHash(htmlStr string) string {
+	h := fnv.New32a()
+	for _, m := range tagOpenRE.FindAllStringSubmatch(htmlStr, -1) {
+		h.Write([]byte(strings.ToLower(m[1])))
+		h.Write([]byte{','})
+	}
+	return fmt.Sprintf("%x", h.Sum32())
+}
+
 func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Request) string {
 	var sb strings.Builder
 
@@ -123,12 +143,12 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	sb.WriteString("  <meta charset=\"UTF-8\">\n")
 	sb.WriteString("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
 	if meta != nil && meta.Title != "" {
-		sb.WriteString(fmt.Sprintf("  <title>%s</title>\n", meta.Title))
+		sb.WriteString(fmt.Sprintf("  <title>%s</title>\n", html.EscapeString(meta.Title)))
 	} else {
 		sb.WriteString("  <title>Lungo App</title>\n")
 	}
 	if meta != nil && meta.Description != "" {
-		sb.WriteString(fmt.Sprintf("  <meta name=\"description\" content=\"%s\">\n", meta.Description))
+		sb.WriteString(fmt.Sprintf("  <meta name=\"description\" content=\"%s\">\n", html.EscapeString(meta.Description)))
 	}
 	sb.WriteString("  <link rel=\"stylesheet\" href=\"/static/styles.css\">\n")
 	if a.opts.HeadExtra != "" {
@@ -147,17 +167,22 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	}
 
 	var layoutDataMap map[string]json.RawMessage
+	var innerHTML string
 	if hasSSR {
 		ssrHTML, layoutDataMap = a.wrapInLayoutsWithData(ssrHTML, route, isDark, r)
-		sb.WriteString(ssrHTML)
+		innerHTML = ssrHTML
 	} else {
-		sb.WriteString(a.renderLayoutShell(route))
+		innerHTML = a.renderLayoutShell(route)
 	}
+	sb.WriteString(innerHTML)
 	sb.WriteString("</div>\n\n")
 
 	sb.WriteString("<script>\n")
 	if a.opts.Dev {
 		sb.WriteString("  window.__LUNGO_DEV__ = true;\n")
+	}
+	if hasSSR {
+		sb.WriteString(fmt.Sprintf("  window.__LUNGO_SSR_HASH__ = %q;\n", ssrTagHash(innerHTML)))
 	}
 
 	// Inject LUNGO_PUBLIC_* env vars for client-side process.env access
