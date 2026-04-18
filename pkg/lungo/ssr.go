@@ -42,13 +42,16 @@ func (a *App) servePageFragment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return JSON with the rendered HTML and loader data
+	// Return JSON with the rendered HTML, loader data, and metadata so the
+	// client can update <title> / <meta name=description> on nav.
 	response := struct {
 		HTML string          `json:"html"`
 		Data json.RawMessage `json:"data,omitempty"`
+		Meta *PageMetadata   `json:"meta,omitempty"`
 	}{
 		HTML: pageHTML,
 		Data: loaderData,
+		Meta: a.extractMetadata(route.PagePath),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

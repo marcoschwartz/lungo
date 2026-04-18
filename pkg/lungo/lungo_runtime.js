@@ -1186,6 +1186,21 @@
             } catch (_) {}
           }
 
+          // Update <title> / <meta name=description> so client nav
+          // mirrors a full page load's document metadata.
+          if (pageData.meta) {
+            if (pageData.meta.title) document.title = pageData.meta.title;
+            if (pageData.meta.description) {
+              let m = document.querySelector('meta[name="description"]');
+              if (!m) {
+                m = document.createElement("meta");
+                m.setAttribute("name", "description");
+                document.head.appendChild(m);
+              }
+              m.setAttribute("content", pageData.meta.description);
+            }
+          }
+
           // Use server-rendered HTML (like Next.js RSC)
           setView({
             Page: null,
