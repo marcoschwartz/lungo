@@ -62,6 +62,36 @@ func (a *App) getPageCache(pagePath string) (*ssrPageCache, error) {
 		}
 	}
 
+	// Resolve ES imports and strip them before espresso sees the source. The
+	// recovered bindings are merged into evaluation scope later in the
+	// evaluate* helpers. Same for named `export` prefixes so local
+	// declarations like `export function Hero()` are picked up.
+	importSpecs, source := parseImports(source)
+	source = stripExportKeyword(source)
+
+	importScope := map[string]*espresso.Value{}
+	for _, spec := range importSpecs {
+		childPath := resolveImportPath(spec.path, pagePath)
+		child, err := a.getModuleScope(childPath, nil)
+		if err != nil {
+			if a.opts.Dev {
+				log.Printf("[Lungo] import %q in %s failed: %v", spec.path, pagePath, err)
+			}
+			continue
+		}
+		if len(spec.names) == 0 {
+			for k, v := range child {
+				importScope[k] = wrapImport(v, child)
+			}
+			continue
+		}
+		for local, imported := range spec.names {
+			if v, ok := child[imported]; ok {
+				importScope[local] = wrapImport(v, child)
+			}
+		}
+	}
+
 	funcBody, funcParams, err := espresso.ExtractDefaultExport(source)
 	if err != nil {
 		return nil, fmt.Errorf("extract default export: %w", err)
@@ -81,6 +111,7 @@ func (a *App) getPageCache(pagePath string) (*ssrPageCache, error) {
 		tokens:       tokens,
 		interactive:  isInteractive,
 		topLevelVars: topLevelVars,
+		importScope:  importScope,
 	}
 
 	if !a.opts.Dev {
@@ -100,6 +131,12 @@ func (a *App) evaluatePageSSR(pagePath string, loaderData json.RawMessage, param
 	}
 
 	scope := buildSSRScope(cached.localFuncs)
+
+	// Imports take effect before local vars so a local var with the same
+	// name wins (matches how `const x = ...` shadows an import of `x`).
+	for k, v := range cached.importScope {
+		scope[k] = v
+	}
 
 	// Inject top-level vars (const navLinks = [...], etc.)
 	for k, v := range cached.topLevelVars {
@@ -232,6 +269,11 @@ func (a *App) evaluateLayoutWithData(layoutPath string, childrenHTML string, isD
 
 	scope := buildSSRScope(cached.localFuncs)
 	stubHooksInScope(scope, urlPath)
+
+	// Imports before top-level vars so local decls shadow imports.
+	for k, v := range cached.importScope {
+		scope[k] = v
+	}
 
 	// Inject top-level vars (const navLinks = [...], etc.)
 	for k, v := range cached.topLevelVars {

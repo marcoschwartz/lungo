@@ -167,9 +167,11 @@ type App struct {
 	hmr         *HMR
 	htmlCache   map[string]*htmlCacheEntry
 	htmlCacheMu sync.RWMutex
-	jsxCache    map[string]jsxCacheEntry
-	jsxCacheMu  sync.RWMutex
-	publicEnv   map[string]string // LUNGO_PUBLIC_* env vars exposed to JSX
+	jsxCache      map[string]jsxCacheEntry
+	jsxCacheMu    sync.RWMutex
+	moduleCache   map[string]moduleCacheEntry
+	moduleCacheMu sync.RWMutex
+	publicEnv     map[string]string // LUNGO_PUBLIC_* env vars exposed to JSX
 }
 
 type htmlCacheEntry struct {
@@ -248,11 +250,12 @@ func New(opts Options) *App {
 	}
 
 	app := &App{
-		opts:      opts,
-		apiRoutes: make(map[string]http.HandlerFunc),
-		htmlCache: make(map[string]*htmlCacheEntry),
-		jsxCache:  make(map[string]jsxCacheEntry),
-		publicEnv: publicEnv,
+		opts:        opts,
+		apiRoutes:   make(map[string]http.HandlerFunc),
+		htmlCache:   make(map[string]*htmlCacheEntry),
+		jsxCache:    make(map[string]jsxCacheEntry),
+		moduleCache: make(map[string]moduleCacheEntry),
+		publicEnv:   publicEnv,
 	}
 
 	if opts.AppFS != nil {

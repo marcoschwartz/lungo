@@ -245,6 +245,10 @@ type ssrPageCache struct {
 	topLevelVars map[string]*espresso.Value
 	tokens       []espresso.Tok
 	interactive  bool
+	// importScope is the merged set of bindings brought in by this module's
+	// `import { ... } from "..."` statements. Injected into evaluation scope
+	// so JSX references to imported components resolve during SSR.
+	importScope map[string]*espresso.Value
 }
 
 // extractMetadataFromSource extracts title/description from page source.

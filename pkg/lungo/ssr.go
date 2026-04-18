@@ -447,10 +447,21 @@ func (a *App) fetchSingleSource(source LoaderSource, segments map[string]string,
 }
 
 func (a *App) callHandler(pattern, url string, r *http.Request) json.RawMessage {
-	handler, ok := a.apiRoutes[pattern]
+	// Loader URLs often carry query strings like `/api/page?slug=home`. Strip
+	// before looking up so they match the registered `/api/page` route.
+	patternPath := pattern
+	if i := strings.Index(patternPath, "?"); i >= 0 {
+		patternPath = patternPath[:i]
+	}
+	matchURL := url
+	if i := strings.Index(matchURL, "?"); i >= 0 {
+		matchURL = matchURL[:i]
+	}
+
+	handler, ok := a.apiRoutes[patternPath]
 	if !ok {
 		for p, h := range a.apiRoutes {
-			if _, matched := matchPattern(p, url); matched {
+			if _, matched := matchPattern(p, matchURL); matched {
 				handler = h
 				ok = true
 				break
