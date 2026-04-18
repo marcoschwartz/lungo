@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,50 @@ func safeJoin(base, name string) (string, bool) {
 func contentETag(data []byte) string {
 	sum := sha256.Sum256(data)
 	return `"` + hex.EncodeToString(sum[:16]) + `"`
+}
+
+// Names Lungo makes available via window.Lungo. Transpiled JSX compiles to
+// h(...) calls, so any module that omits h from its destructure will explode
+// with "h is not defined" unless we inject it.
+var lungoRuntimeNames = []string{
+	"h", "Fragment", "useState", "useEffect", "useMemo", "useRef", "useRouter", "createPortal",
+}
+
+// lungoDestructureRE matches `const { ... } = window.Lungo;` (also let/var).
+// Capture group 2 is the comma-separated name list inside the braces.
+var lungoDestructureRE = regexp.MustCompile(`(const|let|var)\s*\{\s*([^}]+?)\s*\}\s*=\s*window\.Lungo\s*;?`)
+
+// ensureLungoImports guarantees every runtime name is in scope. If the module
+// already destructures from window.Lungo we merge in any missing names;
+// otherwise we prepend a full destructure. This avoids the common footgun
+// where `const { useRouter } = window.Lungo` leaves `h` undefined after JSX
+// transpile.
+func ensureLungoImports(src []byte) []byte {
+	m := lungoDestructureRE.FindSubmatchIndex(src)
+	if m == nil {
+		header := "const { " + strings.Join(lungoRuntimeNames, ", ") + " } = window.Lungo;\n"
+		return append([]byte(header), src...)
+	}
+	existing := string(src[m[4]:m[5]])
+	have := map[string]bool{}
+	for _, n := range strings.Split(existing, ",") {
+		have[strings.TrimSpace(n)] = true
+	}
+	var missing []string
+	for _, n := range lungoRuntimeNames {
+		if !have[n] {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) == 0 {
+		return src
+	}
+	merged := existing + ", " + strings.Join(missing, ", ")
+	out := make([]byte, 0, len(src)+len(merged)-len(existing))
+	out = append(out, src[:m[4]]...)
+	out = append(out, []byte(merged)...)
+	out = append(out, src[m[5]:]...)
+	return out
 }
 
 // Middleware is a function that wraps an http.Handler.
@@ -448,10 +493,7 @@ func (a *App) serveAppFile(w http.ResponseWriter, r *http.Request, name string) 
 				} else {
 					data = []byte(result)
 				}
-				// Auto-inject h if the transpiled module didn't reference window.Lungo.
-				if !strings.Contains(string(data), "window.Lungo") {
-					data = []byte("const { h, Fragment, useState, useEffect, useMemo, useRef, useRouter, createPortal } = window.Lungo;\n" + string(data))
-				}
+				data = ensureLungoImports(data)
 			}
 			etag = contentETag(data)
 			a.jsxCachePut(name, jsxCacheEntry{data: data, etag: etag, modTime: modTime})
