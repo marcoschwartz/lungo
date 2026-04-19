@@ -105,14 +105,15 @@ func mergeMetadataFromLoader(base *PageMetadata, loaderData json.RawMessage) *Pa
 	if len(loaderData) == 0 {
 		return base
 	}
-	var fromLoader struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-	}
+	// Unmarshal into a *shape-compatible* PageMetadata. Loader JSON keys
+	// (title, description, og, twitter, canonical) map 1:1.
+	var fromLoader PageMetadata
 	if err := json.Unmarshal(loaderData, &fromLoader); err != nil {
 		return base
 	}
-	if fromLoader.Title == "" && fromLoader.Description == "" {
+	empty := fromLoader.Title == "" && fromLoader.Description == "" &&
+		fromLoader.OG == nil && fromLoader.Twitter == nil && fromLoader.Canonical == ""
+	if empty {
 		return base
 	}
 	out := base
@@ -124,6 +125,15 @@ func mergeMetadataFromLoader(base *PageMetadata, loaderData json.RawMessage) *Pa
 	}
 	if fromLoader.Description != "" && out.Description == "" {
 		out.Description = fromLoader.Description
+	}
+	if fromLoader.OG != nil {
+		out.OG = fromLoader.OG
+	}
+	if fromLoader.Twitter != nil {
+		out.Twitter = fromLoader.Twitter
+	}
+	if fromLoader.Canonical != "" {
+		out.Canonical = fromLoader.Canonical
 	}
 	return out
 }
@@ -191,6 +201,11 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	}
 	if meta != nil && meta.Description != "" {
 		sb.WriteString(fmt.Sprintf("  <meta name=\"description\" content=\"%s\">\n", html.EscapeString(meta.Description)))
+	}
+	// Open Graph + Twitter Card + canonical. Emitted only when we have real
+	// data — no guessing. See metadata.go for the PageMetadata struct shape.
+	if r != nil {
+		sb.WriteString(renderSocialMetaHead(meta, r))
 	}
 	sb.WriteString("  <link rel=\"stylesheet\" href=\"/static/styles.css\">\n")
 	if a.opts.HeadExtra != "" {

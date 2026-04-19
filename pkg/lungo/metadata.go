@@ -2,15 +2,49 @@ package lungo
 
 import (
 	"encoding/json"
+	"fmt"
 	"html"
+	"net/http"
 	"regexp"
 	"strings"
 )
 
-// PageMetadata holds SEO metadata extracted from page.js files.
+// PageMetadata holds SEO metadata extracted from page.js files OR from
+// per-request loader data. All fields are optional — empty means "don't emit
+// that tag" (safer than guessing content).
 type PageMetadata struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	Title       string           `json:"title,omitempty"`
+	Description string           `json:"description,omitempty"`
+
+	// Open Graph + Twitter card. Conservative defaults:
+	//   - og.image absent → no <meta property="og:image"> emitted
+	//   - twitter.card absent → "summary_large_image" if og.image set, else omitted
+	//   - og.type absent → "website"
+	//   - canonical emitted only when explicit (no guessing)
+	OG          *OpenGraphMeta   `json:"og,omitempty"`
+	Twitter     *TwitterMeta     `json:"twitter,omitempty"`
+	Canonical   string           `json:"canonical,omitempty"`
+}
+
+// OpenGraphMeta drives <meta property="og:*"> tags.
+type OpenGraphMeta struct {
+	Title       string `json:"title,omitempty"`       // falls back to Title
+	Description string `json:"description,omitempty"` // falls back to Description
+	Image       string `json:"image,omitempty"`
+	Type        string `json:"type,omitempty"`        // default "website"
+	Locale      string `json:"locale,omitempty"`
+	SiteName    string `json:"site_name,omitempty"`
+	URL         string `json:"url,omitempty"`         // defaults to current request URL
+}
+
+// TwitterMeta drives <meta name="twitter:*"> tags.
+type TwitterMeta struct {
+	Card        string `json:"card,omitempty"`        // default based on og.image
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Image       string `json:"image,omitempty"`
+	Site        string `json:"site,omitempty"`        // @handle
+	Creator     string `json:"creator,omitempty"`
 }
 
 // extractMetadata reads a page.js file and extracts the metadata export.
@@ -150,4 +184,133 @@ func renderMetadataHead(meta *PageMetadata) string {
 		sb.WriteString("\">\n")
 	}
 	return sb.String()
+}
+
+// renderSocialMetaHead renders Open Graph + Twitter Card + canonical tags.
+// Conservative rendering — empty fields emit nothing. Falls back only where
+// safe: og:title → meta.Title, og:description → meta.Description,
+// og:type → "website", twitter:card → "summary_large_image" when an image
+// is present (else omitted).
+//
+// Request is used only to fill og:url when it's not explicitly set AND
+// meta.OG itself is non-nil (avoids emitting a bare og:url with no context).
+func renderSocialMetaHead(meta *PageMetadata, r *http.Request) string {
+	if meta == nil {
+		return ""
+	}
+	var sb strings.Builder
+	write := func(tag, name, content string) {
+		if content == "" {
+			return
+		}
+		sb.WriteString("  <meta ")
+		sb.WriteString(tag)
+		sb.WriteString("=\"")
+		sb.WriteString(name)
+		sb.WriteString("\" content=\"")
+		sb.WriteString(html.EscapeString(content))
+		sb.WriteString("\">\n")
+	}
+
+	// Open Graph. Emit the block when any OG-relevant field exists —
+	// og:title + og:description fall back to the page's regular title/desc
+	// so a plain Hero page still gets a nice preview card.
+	og := meta.OG
+	if og != nil || meta.Title != "" || meta.Description != "" {
+		ogTitle := meta.Title
+		if og != nil && og.Title != "" {
+			ogTitle = og.Title
+		}
+		ogDesc := meta.Description
+		if og != nil && og.Description != "" {
+			ogDesc = og.Description
+		}
+		ogType := "website"
+		if og != nil && og.Type != "" {
+			ogType = og.Type
+		}
+		ogURL := ""
+		ogImage, ogLocale, ogSiteName := "", "", ""
+		if og != nil {
+			ogURL = og.URL
+			ogImage = og.Image
+			ogLocale = og.Locale
+			ogSiteName = og.SiteName
+		}
+		if ogURL == "" && r != nil {
+			ogURL = requestURL(r)
+		}
+		write("property", "og:title", ogTitle)
+		write("property", "og:description", ogDesc)
+		write("property", "og:type", ogType)
+		write("property", "og:url", ogURL)
+		write("property", "og:site_name", ogSiteName)
+		write("property", "og:locale", ogLocale)
+		if ogImage != "" {
+			write("property", "og:image", ogImage)
+			// Standard social-card dimensions; callers can override by
+			// setting explicit meta tags via HeadExtra if needed.
+			sb.WriteString("  <meta property=\"og:image:width\" content=\"1200\">\n")
+			sb.WriteString("  <meta property=\"og:image:height\" content=\"630\">\n")
+		}
+	}
+
+	// Twitter Card. Defaults to the OG image if nothing more specific.
+	tw := meta.Twitter
+	hasOGImage := meta.OG != nil && meta.OG.Image != ""
+	if tw != nil || hasOGImage {
+		card := "summary"
+		if tw != nil && tw.Card != "" {
+			card = tw.Card
+		} else if hasOGImage {
+			card = "summary_large_image"
+		}
+		twTitle, twDesc, twImage, twSite, twCreator := "", "", "", "", ""
+		if tw != nil {
+			twTitle, twDesc, twImage = tw.Title, tw.Description, tw.Image
+			twSite, twCreator = tw.Site, tw.Creator
+		}
+		if twImage == "" && hasOGImage {
+			twImage = meta.OG.Image
+		}
+		write("name", "twitter:card", card)
+		write("name", "twitter:title", firstNonEmpty(twTitle, meta.Title))
+		write("name", "twitter:description", firstNonEmpty(twDesc, meta.Description))
+		write("name", "twitter:image", twImage)
+		write("name", "twitter:site", twSite)
+		write("name", "twitter:creator", twCreator)
+	}
+
+	// Canonical — only when explicitly set. Emitting a guess can hurt SEO.
+	if meta.Canonical != "" {
+		sb.WriteString(fmt.Sprintf("  <link rel=\"canonical\" href=\"%s\">\n",
+			html.EscapeString(meta.Canonical)))
+	}
+
+	return sb.String()
+}
+
+func requestURL(r *http.Request) string {
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		if r.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	host := r.Host
+	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
+		host = xfh
+	}
+	return proto + "://" + host + r.URL.Path
+}
+
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
