@@ -43,7 +43,9 @@ func (a *App) servePageFragment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return JSON with the rendered HTML, loader data, and metadata so the
-	// client can update <title> / <meta name=description> on nav.
+	// client can update <title> / <meta name=description> on nav. Loader
+	// data takes precedence over page-source metadata — see
+	// mergeMetadataFromLoader.
 	response := struct {
 		HTML string          `json:"html"`
 		Data json.RawMessage `json:"data,omitempty"`
@@ -51,7 +53,7 @@ func (a *App) servePageFragment(w http.ResponseWriter, r *http.Request) {
 	}{
 		HTML: pageHTML,
 		Data: loaderData,
-		Meta: a.extractMetadata(route.PagePath),
+		Meta: mergeMetadataFromLoader(a.extractMetadata(route.PagePath), loaderData),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -92,6 +94,40 @@ func pageURL(relPath string) string {
 // It ignores close tags (</...), doctype, and comments (<!...).
 var tagOpenRE = regexp.MustCompile(`<([a-zA-Z][a-zA-Z0-9-]*)`)
 
+// mergeMetadataFromLoader overlays title/description from loader data on top
+// of any metadata pulled from the page source. Loader data represents the
+// current request's content (often CMS-driven), so a title there takes
+// precedence over a static `export const metadata = {...}` in the source.
+//
+// Returns the (possibly new) metadata, or the base unchanged if the loader
+// data isn't shaped like {title, description}.
+func mergeMetadataFromLoader(base *PageMetadata, loaderData json.RawMessage) *PageMetadata {
+	if len(loaderData) == 0 {
+		return base
+	}
+	var fromLoader struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(loaderData, &fromLoader); err != nil {
+		return base
+	}
+	if fromLoader.Title == "" && fromLoader.Description == "" {
+		return base
+	}
+	out := base
+	if out == nil {
+		out = &PageMetadata{}
+	}
+	if fromLoader.Title != "" {
+		out.Title = fromLoader.Title
+	}
+	if fromLoader.Description != "" && out.Description == "" {
+		out.Description = fromLoader.Description
+	}
+	return out
+}
+
 // ssrTagHash computes an FNV-1a 32-bit hash over the sequence of opening tag
 // names in the SSR HTML. The client computes the same hash over the live DOM
 // after hydration and warns on mismatch — catching silent hydration drift
@@ -108,9 +144,12 @@ func ssrTagHash(htmlStr string) string {
 func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Request) string {
 	var sb strings.Builder
 
-	// Extract metadata from page
-	meta := a.extractMetadata(route.PagePath)
-	// Fall back to layout metadata if page has none
+	// Metadata priority: loader data (per-request) > page source > layout.
+	// Loader data wins because it can reflect dynamic/CMS-driven content
+	// where the page source file is a thin rendering shell.
+	meta := mergeMetadataFromLoader(a.extractMetadata(route.PagePath), loaderData)
+	// Fall back to layout metadata if neither loader data nor page source
+	// supplied a title yet.
 	if (meta == nil || meta.Title == "") && len(route.Layouts) > 0 {
 		for _, layoutPath := range route.Layouts {
 			layoutMeta := a.extractMetadata(layoutPath)
