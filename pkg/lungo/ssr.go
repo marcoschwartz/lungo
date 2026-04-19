@@ -475,8 +475,13 @@ func (a *App) callHandler(pattern, url string, r *http.Request) json.RawMessage 
 	rec := &responseRecorder{headers: make(http.Header)}
 	fakeReq, _ := http.NewRequest("GET", url, nil)
 
-	// Forward cookies and auth headers
+	// Inherit the original request's context (so middleware-injected values
+	// like tenant flow through to loader-fired handlers), cookies, auth
+	// headers, and Host. Without this, an SSR loader would see an empty
+	// context and effectively run unauthenticated / unscoped.
 	if r != nil {
+		fakeReq = fakeReq.WithContext(r.Context())
+		fakeReq.Host = r.Host
 		for _, cookie := range r.Cookies() {
 			fakeReq.AddCookie(cookie)
 		}

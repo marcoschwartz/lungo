@@ -64,9 +64,12 @@ func (a *App) getPageCache(pagePath string) (*ssrPageCache, error) {
 
 	// Resolve ES imports and strip them before espresso sees the source. The
 	// recovered bindings are merged into evaluation scope later in the
-	// evaluate* helpers. Same for named `export` prefixes so local
-	// declarations like `export function Hero()` are picked up.
+	// evaluate* helpers. Also strip comments (espresso's parsers don't
+	// understand them — a stray apostrophe in a // comment reads as a string
+	// start and breaks brace counting) and `export` prefixes on named
+	// declarations so `export function Hero()` is picked up.
 	importSpecs, source := parseImports(source)
+	source = stripComments(source)
 	source = stripExportKeyword(source)
 
 	importScope := map[string]*espresso.Value{}

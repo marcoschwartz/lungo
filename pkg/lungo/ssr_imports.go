@@ -96,6 +96,59 @@ func stripExportKeyword(source string) string {
 	return exportKeywordRE.ReplaceAllString(source, "$1$2")
 }
 
+// stripComments removes // line comments and /* */ block comments from source
+// while preserving string literals. Necessary because espresso's parsers
+// don't understand comments — an apostrophe in "It's" inside a // comment
+// would start a phantom string state that breaks brace counting.
+func stripComments(source string) string {
+	var out strings.Builder
+	out.Grow(len(source))
+	i := 0
+	inStr := byte(0)
+	for i < len(source) {
+		c := source[i]
+		if inStr != 0 {
+			out.WriteByte(c)
+			if c == inStr && (i == 0 || source[i-1] != '\\') {
+				inStr = 0
+			}
+			i++
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			inStr = c
+			out.WriteByte(c)
+			i++
+			continue
+		}
+		if c == '/' && i+1 < len(source) && source[i+1] == '/' {
+			// Line comment — skip to end of line (keep the newline).
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(source) && source[i+1] == '*' {
+			// Block comment — skip through */. Preserve any newlines inside so
+			// line numbers stay stable.
+			i += 2
+			for i+1 < len(source) && !(source[i] == '*' && source[i+1] == '/') {
+				if source[i] == '\n' {
+					out.WriteByte('\n')
+				}
+				i++
+			}
+			if i+1 < len(source) {
+				i += 2
+			}
+			continue
+		}
+		out.WriteByte(c)
+		i++
+	}
+	return out.String()
+}
+
 // resolveImportPath turns an import specifier into an AppDir-relative path.
 //   /app/foo.js → foo.js
 //   ./bar       → <dir-of-importer>/bar
@@ -145,6 +198,7 @@ func (a *App) getModuleScope(modulePath string, stack []string) (map[string]*esp
 	if strings.HasSuffix(resolved, ".jsx") {
 		source, _ = TranspileJSXWithErrors(source)
 	}
+	source = stripComments(source)
 	source = stripExportKeyword(source)
 
 	specs, cleaned := parseImports(source)
@@ -177,7 +231,7 @@ func (a *App) getModuleScope(modulePath string, stack []string) (map[string]*esp
 		}
 	}
 
-	for name, fn := range espresso.ExtractFunctions(cleaned) {
+	for name, fn := range extractAllFunctions(cleaned) {
 		scope[name] = fn
 	}
 	// Evaluate top-level vars directly into `scope` so declarations like
@@ -192,6 +246,113 @@ func (a *App) getModuleScope(modulePath string, stack []string) (map[string]*esp
 	}
 
 	return scope, nil
+}
+
+// funcHeaderRE matches top-level `function NAME(` declarations.
+var funcHeaderRE = regexp.MustCompile(`(?m)^function\s+[A-Za-z_$][\w$]*\s*\(`)
+
+// extractAllFunctions is a robust replacement for espresso.ExtractFunctions.
+// Espresso's version has an offset miscalculation that occasionally skips a
+// function when the main scan lands inside a previous body. We sidestep it by
+// locating each top-level function header ourselves, isolating its span, and
+// calling espresso on the single-function chunk — where the offset bug can't
+// bite.
+func extractAllFunctions(source string) map[string]*espresso.Value {
+	out := map[string]*espresso.Value{}
+	for _, pos := range funcHeaderRE.FindAllStringIndex(source, -1) {
+		end := findFunctionEnd(source, pos[0])
+		if end < 0 {
+			continue
+		}
+		for name, fn := range espresso.ExtractFunctions(source[pos[0]:end]) {
+			out[name] = fn
+		}
+	}
+	return out
+}
+
+// findFunctionEnd returns the byte offset just past the closing `}` of the
+// function declaration that starts at `start`. Returns -1 if the declaration
+// is malformed. Handles strings (single / double / backtick) correctly; does
+// not parse comments (sufficient for our use).
+func findFunctionEnd(source string, start int) int {
+	i := start
+	for i < len(source) && source[i] != '(' {
+		i++
+	}
+	if i >= len(source) {
+		return -1
+	}
+	i = skipBalanced(source, i, '(', ')')
+	if i < 0 {
+		return -1
+	}
+	for i < len(source) && source[i] != '{' {
+		i++
+	}
+	if i >= len(source) {
+		return -1
+	}
+	i = skipBalanced(source, i, '{', '}')
+	if i < 0 {
+		return -1
+	}
+	return i
+}
+
+// skipBalanced advances past a paren/brace group starting at `start` (which
+// must point at `open`). Returns the index just past the matching `close`, or
+// -1 if unbalanced. Tracks string literals AND comments — without the latter,
+// an apostrophe in a comment (e.g. "It's") would start a phantom string state
+// that swallows the closing brace.
+func skipBalanced(source string, start int, open, close byte) int {
+	if source[start] != open {
+		return -1
+	}
+	depth := 1
+	inStr := byte(0)
+	i := start + 1
+	for i < len(source) {
+		c := source[i]
+		if inStr != 0 {
+			if c == inStr && source[i-1] != '\\' {
+				inStr = 0
+			}
+			i++
+			continue
+		}
+		// Line comment — skip to newline.
+		if c == '/' && i+1 < len(source) && source[i+1] == '/' {
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		// Block comment — skip to */.
+		if c == '/' && i+1 < len(source) && source[i+1] == '*' {
+			i += 2
+			for i+1 < len(source) && !(source[i] == '*' && source[i+1] == '/') {
+				i++
+			}
+			i += 2
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			inStr = c
+			i++
+			continue
+		}
+		if c == open {
+			depth++
+		} else if c == close {
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+		i++
+	}
+	return -1
 }
 
 // wrapImport binds an exported value to its defining module's scope. If the
