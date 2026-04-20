@@ -12,8 +12,15 @@ import (
 // ── SSR Scope Setup ─────────────────────────────────────
 
 // buildSSRScope creates a scope with SSR hook stubs and local functions.
+//
+// Registers espresso built-in globals (Number, String, Boolean, JSON, Math,
+// Object, Array, …) in the scope. Without this the bytecode VM — which does
+// ordinary scope lookup for call sites — silently returns undefined for
+// things like `Number(level)`, which broke SSR tag selection in React-style
+// components (e.g. `<h${level}>` rendering logic).
 func buildSSRScope(localFuncs map[string]*espresso.Value) map[string]*espresso.Value {
-	scope := make(map[string]*espresso.Value, len(localFuncs)+10)
+	scope := make(map[string]*espresso.Value, len(localFuncs)+32)
+	espresso.RegisterBuiltinGlobals(scope)
 	for name, fn := range localFuncs {
 		scope[name] = fn
 	}
