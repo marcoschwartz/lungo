@@ -208,6 +208,16 @@ func (a *App) renderPage(route *Route, loaderData json.RawMessage, r *http.Reque
 	if meta != nil && meta.Description != "" {
 		sb.WriteString(fmt.Sprintf("  <meta name=\"description\" content=\"%s\">\n", html.EscapeString(meta.Description)))
 	}
+	if meta != nil && meta.Favicon != "" {
+		href := html.EscapeString(meta.Favicon)
+		// Type hint for SVG so browsers pick it over a parallel .ico.
+		if strings.HasSuffix(strings.ToLower(meta.Favicon), ".svg") {
+			sb.WriteString(fmt.Sprintf("  <link rel=\"icon\" type=\"image/svg+xml\" href=\"%s\">\n", href))
+		} else {
+			sb.WriteString(fmt.Sprintf("  <link rel=\"icon\" href=\"%s\">\n", href))
+		}
+		sb.WriteString(fmt.Sprintf("  <link rel=\"apple-touch-icon\" href=\"%s\">\n", href))
+	}
 	// Open Graph + Twitter Card + canonical. Emitted only when we have real
 	// data — no guessing. See metadata.go for the PageMetadata struct shape.
 	if r != nil {
