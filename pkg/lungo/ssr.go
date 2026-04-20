@@ -112,6 +112,7 @@ func mergeMetadataFromLoader(base *PageMetadata, loaderData json.RawMessage) *Pa
 		return base
 	}
 	empty := fromLoader.Title == "" && fromLoader.Description == "" &&
+		fromLoader.Favicon == "" &&
 		fromLoader.OG == nil && fromLoader.Twitter == nil && fromLoader.Canonical == ""
 	if empty {
 		return base
@@ -125,6 +126,11 @@ func mergeMetadataFromLoader(base *PageMetadata, loaderData json.RawMessage) *Pa
 	}
 	if fromLoader.Description != "" && out.Description == "" {
 		out.Description = fromLoader.Description
+	}
+	if fromLoader.Favicon != "" {
+		// Loader (request-scoped, usually tenant-driven) wins over page source
+		// so multi-tenant hosts can set a per-tenant icon without touching page files.
+		out.Favicon = fromLoader.Favicon
 	}
 	if fromLoader.OG != nil {
 		out.OG = fromLoader.OG

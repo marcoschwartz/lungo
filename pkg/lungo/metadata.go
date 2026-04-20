@@ -16,6 +16,13 @@ type PageMetadata struct {
 	Title       string           `json:"title,omitempty"`
 	Description string           `json:"description,omitempty"`
 
+	// Favicon URL — absolute URL or site-relative path. When set, emits
+	// <link rel="icon"> + <link rel="apple-touch-icon">. SVG URLs get a
+	// type="image/svg+xml" hint so browsers pick them over .ico siblings.
+	// Empty = no icon link emitted (the browser will 404 on /favicon.ico
+	// unless the host serves one itself).
+	Favicon     string           `json:"favicon,omitempty"`
+
 	// Open Graph + Twitter card. Conservative defaults:
 	//   - og.image absent → no <meta property="og:image"> emitted
 	//   - twitter.card absent → "summary_large_image" if og.image set, else omitted
@@ -181,6 +188,20 @@ func renderMetadataHead(meta *PageMetadata) string {
 	if meta.Description != "" {
 		sb.WriteString("  <meta name=\"description\" content=\"")
 		sb.WriteString(html.EscapeString(meta.Description))
+		sb.WriteString("\">\n")
+	}
+	if meta.Favicon != "" {
+		href := html.EscapeString(meta.Favicon)
+		// Hint the MIME type for SVG so browsers prefer it over a parallel .ico.
+		if strings.HasSuffix(strings.ToLower(meta.Favicon), ".svg") {
+			sb.WriteString("  <link rel=\"icon\" type=\"image/svg+xml\" href=\"")
+		} else {
+			sb.WriteString("  <link rel=\"icon\" href=\"")
+		}
+		sb.WriteString(href)
+		sb.WriteString("\">\n")
+		sb.WriteString("  <link rel=\"apple-touch-icon\" href=\"")
+		sb.WriteString(href)
 		sb.WriteString("\">\n")
 	}
 	return sb.String()
