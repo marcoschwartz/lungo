@@ -4,5 +4,7 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/marcoschwartz/espresso v1.0.1-0.20260420074652-f4463cdf8eac h1:YPvbapd7RZhmYz3lKGilhCYcfmhhOYVL6D+0PDzZnCI=
 github.com/marcoschwartz/espresso v1.0.1-0.20260420074652-f4463cdf8eac/go.mod h1:Kk/nXnkqEU4u0Pqn1sIBX2xfZ8jwsow4mhiPZIkUMt0=
+github.com/marcoschwartz/espresso v1.0.1-0.20260422072700-effcbba07489 h1:ChQdf4ke/+eIHs53keAfh3yFb0xl36brLGoZQ/n5UH8=
+github.com/marcoschwartz/espresso v1.0.1-0.20260422072700-effcbba07489/go.mod h1:Kk/nXnkqEU4u0Pqn1sIBX2xfZ8jwsow4mhiPZIkUMt0=
 golang.org/x/sys v0.13.0 h1:Af8nKPmuFypiUBjVoU9V20FiaFXOcuZI21p0ycVYYGE=
 golang.org/x/sys v0.13.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
