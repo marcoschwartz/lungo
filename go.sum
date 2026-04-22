@@ -6,5 +6,7 @@ github.com/marcoschwartz/espresso v1.0.1-0.20260420074652-f4463cdf8eac h1:YPvbap
 github.com/marcoschwartz/espresso v1.0.1-0.20260420074652-f4463cdf8eac/go.mod h1:Kk/nXnkqEU4u0Pqn1sIBX2xfZ8jwsow4mhiPZIkUMt0=
 github.com/marcoschwartz/espresso v1.0.1-0.20260422072700-effcbba07489 h1:ChQdf4ke/+eIHs53keAfh3yFb0xl36brLGoZQ/n5UH8=
 github.com/marcoschwartz/espresso v1.0.1-0.20260422072700-effcbba07489/go.mod h1:Kk/nXnkqEU4u0Pqn1sIBX2xfZ8jwsow4mhiPZIkUMt0=
+github.com/marcoschwartz/espresso v1.0.1-0.20260422083435-7db03a65fa7f h1:l+Dbvb/jYLQhqeYoqAQXvX7C6QVBFwF557VM6WtJIts=
+github.com/marcoschwartz/espresso v1.0.1-0.20260422083435-7db03a65fa7f/go.mod h1:Kk/nXnkqEU4u0Pqn1sIBX2xfZ8jwsow4mhiPZIkUMt0=
 golang.org/x/sys v0.13.0 h1:Af8nKPmuFypiUBjVoU9V20FiaFXOcuZI21p0ycVYYGE=
 golang.org/x/sys v0.13.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=

@@ -361,20 +361,36 @@ func skipBalanced(source string, start int, open, close byte) int {
 // semantics: an imported `BlockRenderer` that references `registry` from its
 // own module continues to see that `registry`, not whatever happens to be in
 // the caller's scope.
+//
+// Dispatch:
+//   - JSX component call  (`h(Component, {…props})`) → function declared with
+//     destructured params like `function Foo({a, b})`. We spread args[0] into
+//     a name→value map so CallFunc's destructure path sees the fields.
+//   - Regular function call (`expandTheme(site.theme)`) → function declared
+//     with named params like `function expandTheme(siteTheme)`. We pass args
+//     positionally via CallFuncValue.
+//
+// Without this split, `expandTheme(site.theme)` used to spread `site.theme`'s
+// fields into `propsObj`, leaving the named param `siteTheme` unbound and
+// silently resolving to `undefined` inside the function.
 func wrapImport(v *espresso.Value, moduleScope map[string]*espresso.Value) *espresso.Value {
 	if v == nil || v.Type() != espresso.TypeFunc {
 		return v
 	}
+	fnParams := v.FnParams()
+	destructuredJSX := len(fnParams) > 0 && strings.HasPrefix(strings.TrimSpace(fnParams[0]), "{")
+
 	return espresso.NewNativeFunc(func(args []*espresso.Value) *espresso.Value {
-		// h() passes props as a single object; translate to the name→value
-		// shape CallFunc expects.
-		propsObj := map[string]*espresso.Value{}
-		if len(args) > 0 && args[0] != nil && args[0].Type() == espresso.TypeObject && args[0].Object() != nil {
-			for k, val := range args[0].Object() {
-				propsObj[k] = val
+		if destructuredJSX {
+			propsObj := map[string]*espresso.Value{}
+			if len(args) > 0 && args[0] != nil && args[0].Type() == espresso.TypeObject && args[0].Object() != nil {
+				for k, val := range args[0].Object() {
+					propsObj[k] = val
+				}
 			}
+			return espresso.CallFunc(moduleScope, v, propsObj)
 		}
-		return espresso.CallFunc(moduleScope, v, propsObj)
+		return espresso.CallFuncValue(v, args, moduleScope)
 	})
 }
 
